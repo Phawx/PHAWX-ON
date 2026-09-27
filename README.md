@@ -1,6 +1,6 @@
 # Phawx ON
 
-Phawx ON is a small, open-source performance tuning app for Windows handhelds and laptops. It is a native C tray app of about 320 KB with no runtime dependencies. It adds a Steam Deck–style quick-access overlay where you set TDP, EPP, CPU and GPU clocks, and hybrid P/E core behaviour. It also has an **AutoTDP** mode that holds a target frame rate at the lowest CPU and GPU clocks that still reach it.
+Phawx ON is a small, open-source performance tuning app for Windows handhelds and laptops. It is a native C tray app of about 220 KB with no runtime dependencies. It adds a Steam Deck–style quick-access overlay where you set TDP, EPP, CPU and GPU clocks, and hybrid P/E core behaviour. It also has an **AutoTDP** mode that holds a target frame rate at the lowest CPU and GPU clocks that still reach it.
 
 It is built to be a good citizen:
 

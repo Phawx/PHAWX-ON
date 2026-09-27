@@ -7,7 +7,7 @@ endif
 VERSION := $(shell sed -n 's/^\#define PH_VERSION *"\(.*\)"/\1/p' src/version.h)
 
 CFLAGS  = -Os -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
-          -Wno-cast-function-type -ffunction-sections -fdata-sections \
+          -Wno-cast-function-type -ffunction-sections \
           -fno-stack-protector -flto=auto -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -Isrc -Iplugins/sdk
 LDFLAGS = -s -flto=auto -mwindows -municode -Wl,--gc-sections -Wl,--nxcompat -Wl,--dynamicbase -Wl,--high-entropy-va
 LIBS    = -luser32 -lgdi32 -lshell32 -ladvapi32 -lpowrprof -lhid -lsetupapi -ldwmapi -lole32 -loleaut32 -luuid -lmsimg32 -lversion
