@@ -1,5 +1,6 @@
 #include "phawx.h"
 #include <windowsx.h>
+#include <tpcshrd.h>
 
 #define UI_W    380
 #define HDR_H   72
@@ -13,7 +14,7 @@
 
 enum { TM_ANIM = 1, TM_LIVE, TM_COMMIT, TM_TOAST, TM_HOLD };
 enum { WM_UI_SHOW = WM_APP + 40, WM_UI_TOAST, WM_UI_NAV, WM_UI_REFRESH, WM_UI_HOLD };
-enum { DR_NONE, DR_TAP, DR_SCROLL, DR_SLIDER };
+enum { DR_NONE, DR_TAP, DR_SCROLL, DR_SLIDER, DR_CANCEL };   /* DR_CANCEL: slid off its tap */
 
 #define C_BG     RGB(24, 24, 28)
 #define C_HDR    RGB(33, 33, 39)
@@ -177,12 +178,15 @@ static int row_visible(const ph_ctl *c)
 static int selectable(const ph_ctl *c) { return c->type != CT_HEADER && c->type != CT_INFO && c->type != CT_STATUS; }
 static int locked(const ph_ctl *c) { return (c->flags & CF_AUTOTDP) && c->type != CT_INFO && autotdp_running(); }
 
-/* a persisted setting that is away from Default; rows without a key (plugin
-   switches, links) have nothing to reset */
-static int resettable(const ph_ctl *c)
+/* a persisted setting a long press resets; rows without a key (plugin switches,
+   links) have nothing to reset */
+static int holdable(const ph_ctl *c)
 {
-    return c && c->key && selectable(c) && c->type != CT_ACTION && c->active && !locked(c);
+    return c && c->key && selectable(c) && c->type != CT_ACTION && !locked(c);
 }
+
+/* ... and it is away from Default */
+static int resettable(const ph_ctl *c) { return holdable(c) && c->active; }
 
 static int pin_help_get(ph_ctl *c, int32_t *out) { (void)c; *out = TONE_DIM; return 0; }
 static void pin_help_fmt(const ph_ctl *c, int32_t v, wchar_t *b, int n)
@@ -364,6 +368,8 @@ static void apply_val(ph_ctl *c, int32_t v, int confirmed)
         conf = c;
         conf_v = v;
         conf_btn = 0;
+        SetRectEmpty(&rc_yes);    /* the buttons move with the message: none until drawn */
+        SetRectEmpty(&rc_no);
         inval();
         return;
     }
@@ -468,9 +474,12 @@ static void hold_tick(void)
     if (!hold_src || !vis || conf || cur() != hold_ctl) { hold_end(); return; }
     if (ph_ms() - hold_t0 < (uint64_t)hold_ms) { inval(); return; }
     int ptr = hold_src & HOLD_PTR;
+    ph_ctl *c = hold_ctl;
     hold_end();
     if (ptr) held = 1;    /* the finger or button coming up is not a tap */
-    reset_sel();
+    /* a long press also starts on rows at Default, like X or R it then only says so */
+    if (resettable(c)) reset_sel();
+    else ui_toast(locked(c) ? L"Managed by AutoTDP" : L"Already at Default");
 }
 
 /* 0..1000 while the selected row is being held towards Default */
@@ -519,7 +528,7 @@ static void pin_sel(void)
 
 static void toggle_autotdp(void)
 {
-    ph_ctl *c = ph_ctl_find("autotdp.on");
+    ph_ctl *c = ph_ctl_find("auto.on");
     int want = !autotdp_running();
     if (c && !(c->flags & CF_HIDDEN) && c->type == CT_TOGGLE) {
         apply_val(c, want, 1);
@@ -967,14 +976,8 @@ static void draw_confirm(HDC m)
 {
     int t = top_y(), vh = view_h();
     fill(m, 0, t, pw, t + vh, C_SHADE);
-    int bh = S(176), bx0 = S(20), bx1 = pw - S(20);
-    int by = t + (vh - bh) / 2;
-    if (by < t) by = t;
-    rrect(m, bx0, by, bx1, by + bh, S(16), C_ROW);
-    int danger = (conf->flags & CF_DANGER) != 0;
-    text(m, f_bold, danger ? C_DANGER : C_TEXT, danger ? L"Confirm change" : L"Are you sure?",
-         bx0 + S(16), by + S(12), bx1 - S(16), by + S(40), DT_LEFT);
-    wchar_t v[64], msg[256];
+    int bx0 = S(20), bx1 = pw - S(20);
+    wchar_t v[64], msg[640];
     v[0] = 0;
     if (conf->type == CT_SLIDER || conf->type == CT_CHOICE || conf->type == CT_TOGGLE)
         fmt_val(conf, conf_v, v, PH_ARRAY(v));
@@ -982,10 +985,24 @@ static void draw_confirm(HDC m)
     if (conf->desc) lstrcpynW(msg, conf->desc, PH_ARRAY(msg));
     else if (v[0]) ph_swprintf(msg, PH_ARRAY(msg), L"Set %s to %s? This can cause instability.", lbl, v);
     else ph_swprintf(msg, PH_ARRAY(msg), L"%s? This cannot be undone.", lbl);
-    RECT mr = { bx0 + S(16), by + S(44), bx1 - S(16), by + S(112) };
+    /* three lines fit; a longer message (plugin warnings) grows the box, up to the view */
+    const UINT fl = DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX;
+    RECT mr = { bx0 + S(16), 0, bx1 - S(16), 0 };
+    SelectObject(m, f_body);
+    DrawTextW(m, msg, -1, &mr, fl | DT_CALCRECT);
+    int bh = S(176), grow = mr.bottom - mr.top - S(68);
+    if (grow > 0) bh += grow;
+    if (grow > 0 && bh > vh - S(16)) bh = vh - S(16) > S(176) ? vh - S(16) : S(176);
+    int by = t + (vh - bh) / 2;
+    if (by < t) by = t;
+    rrect(m, bx0, by, bx1, by + bh, S(16), C_ROW);
+    int danger = (conf->flags & CF_DANGER) != 0;
+    text(m, f_bold, danger ? C_DANGER : C_TEXT, danger ? L"Confirm change" : L"Are you sure?",
+         bx0 + S(16), by + S(12), bx1 - S(16), by + S(40), DT_LEFT);
+    SetRect(&mr, bx0 + S(16), by + S(44), bx1 - S(16), by + S(112) + bh - S(176));
     SelectObject(m, f_body);
     SetTextColor(m, C_TEXT);
-    DrawTextW(m, msg, -1, &mr, DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS);
+    DrawTextW(m, msg, -1, &mr, fl | DT_END_ELLIPSIS);
     int gy = by + bh - S(52), gh = S(40), mid = (bx0 + bx1) / 2;
     SetRect(&rc_no, bx0 + S(12), gy, mid - S(6), gy + gh);
     SetRect(&rc_yes, mid + S(6), gy, bx1 - S(12), gy + gh);
@@ -1336,7 +1353,23 @@ static void slider_to(int i, int x)
     set_pending(c, v, 1);
 }
 
-static int on_pin(int x, const ph_ctl *c) { return x < S(PAD) + S(PIN_HIT) && ph_ctl_pinnable(c); }
+/* the lower part of a slider row is its track: pressing there drags the knob */
+static int in_track(int i, int y)
+{
+    return rows[i]->type == CT_SLIDER && y >= top_y() + row_y[i] - scroll + S(two_line(i) ? 46 : 32);
+}
+
+static int on_pin(int i, int x, int y)
+{
+    return x < S(PAD) + S(PIN_HIT) && !in_track(i, y) && ph_ctl_pinnable(rows[i]);
+}
+
+/* a press that moves further than this is no longer a tap or a hold */
+static int moved(int x, int y)
+{
+    int sl = S(10);
+    return x - down_x > sl || down_x - x > sl || y - down_y > sl || down_y - y > sl;
+}
 
 /* hold_ms: HOLD_MS for the mouse, HOLD_TOUCH_MS for touch and pen */
 static void press(int x, int y, int hold)
@@ -1354,14 +1387,13 @@ static void press(int x, int y, int hold)
     if (i < 0 || !selectable(rows[i])) return;
     if (sel != i) { commit_pending(); sel = i; }
     ph_ctl *c = rows[i];
-    int ry = top_y() + row_y[i] - scroll;
-    if (on_pin(x, c)) {
+    if (on_pin(i, x, y)) {
         /* the pin reacts to a tap; holding it does not reset anything */
-    } else if (c->type == CT_SLIDER && !locked(c) && y >= ry + S(two_line(i) ? 46 : 32)) {
+    } else if (c->type == CT_SLIDER && !locked(c) && in_track(i, y)) {
         drag = DR_SLIDER;
         KillTimer(hw, TM_COMMIT);
         slider_to(i, x);
-    } else {
+    } else if (holdable(c)) {
         hold_start(HOLD_PTR, hold);
     }
     inval();
@@ -1369,11 +1401,11 @@ static void press(int x, int y, int hold)
 
 static void move(int x, int y)
 {
-    (void)x;
     if (drag == DR_SLIDER && sel >= 0 && sel < nrows) { slider_to(sel, x); return; }
-    if (drag == DR_TAP && down_row >= 0 && (y - down_y > S(10) || down_y - y > S(10))) {
-        drag = DR_SCROLL;
+    /* sliding sideways cancels the tap and the hold; up or down scrolls the list */
+    if ((drag == DR_TAP || drag == DR_CANCEL) && moved(x, y)) {
         hold_stop(HOLD_PTR);
+        drag = down_row >= 0 && (y - down_y > S(10) || down_y - y > S(10)) ? DR_SCROLL : DR_CANCEL;
     }
     if (drag == DR_SCROLL) {
         scroll = down_scroll - (y - down_y);
@@ -1404,7 +1436,7 @@ static void tap(int x, int y)
     int i = hit_row(y);
     if (i < 0 || i != down_row || i != sel) return;
     ph_ctl *c = rows[i];
-    if (on_pin(x, c)) { pin_sel(); return; }
+    if (on_pin(i, x, y)) { pin_sel(); return; }
     if (locked(c)) { ui_toast(L"Managed by AutoTDP"); return; }
     if (c->type == CT_CHOICE) {
         int aw = S(24);
@@ -1426,7 +1458,7 @@ static void release(int x, int y)
     int d = drag;
     drag = DR_NONE;
     if (d == DR_SLIDER) commit_pending();
-    else if (d == DR_TAP && !held) tap(x, y);
+    else if (d == DR_TAP && !held && !moved(x, y)) tap(down_x, down_y);   /* acts on what was pressed */
     inval();
 }
 
@@ -1511,8 +1543,9 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         drag = DR_NONE;
         hold_stop(HOLD_PTR);
         return 0;
-    case 0x02CC:   /* WM_TABLET_QUERYSYSTEMGESTURESTATUS: no press-and-hold right click */
-        return 0x00000001 | 0x00000008 | 0x00000100;   /* DISABLE_PRESSANDHOLD | PENTAPFEEDBACK | FLICKS */
+    case WM_TABLET_QUERYSYSTEMGESTURESTATUS:   /* no press-and-hold right click, no flicks */
+        return TABLET_DISABLE_PRESSANDHOLD | TABLET_DISABLE_PENTAPFEEDBACK | TABLET_DISABLE_PENBARRELFEEDBACK |
+               TABLET_DISABLE_FLICKS;
     case WM_MOUSEWHEEL:
         if (vis && !conf) {
             scroll -= GET_WHEEL_DELTA_WPARAM(w) * S(60) / WHEEL_DELTA;
@@ -1586,14 +1619,15 @@ void ui_init(HINSTANCE hi)
     RegisterClassW(&wc);
     DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
     hw = CreateWindowExW(ex, L"PhawxON.panel", PH_APPNAME_W, WS_POPUP, 0, 0, 1, 1, NULL, NULL, hi, NULL);
-    /* a 2 s touch hold resets a row; Windows' own hold ring and right tap would get in the way */
+    /* a 2 s touch or pen hold resets a row; Windows' own hold ring and right tap would get in the way */
     typedef BOOL (WINAPI *wfs_fn)(HWND, FEEDBACK_TYPE, DWORD, UINT32, const VOID *);
     HMODULE u32 = GetModuleHandleW(L"user32.dll");
     wfs_fn wfs = u32 ? (wfs_fn)(void *)GetProcAddress(u32, "SetWindowFeedbackSetting") : NULL;
     if (hw && wfs) {
+        static const FEEDBACK_TYPE fb[] = { FEEDBACK_TOUCH_PRESSANDHOLD, FEEDBACK_TOUCH_RIGHTTAP, FEEDBACK_PEN_PRESSANDHOLD,
+                                            FEEDBACK_PEN_RIGHTTAP, FEEDBACK_PEN_BARRELVISUALIZATION };
         BOOL off = FALSE;
-        wfs(hw, FEEDBACK_TOUCH_PRESSANDHOLD, 0, sizeof off, &off);
-        wfs(hw, FEEDBACK_TOUCH_RIGHTTAP, 0, sizeof off, &off);
+        for (int i = 0; i < PH_ARRAY(fb); i++) wfs(hw, fb[i], 0, sizeof off, &off);
     }
     toast_hw = CreateWindowExW(ex, L"PhawxON.toast", PH_APPNAME_W, WS_POPUP, 0, 0, 1, 1, NULL, NULL, hi, NULL);
     lstrcpynW(live, L"", PH_ARRAY(live));
