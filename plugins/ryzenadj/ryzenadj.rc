@@ -1,6 +1,7 @@
 #include <winver.h>
 
-/* FileDescription is the name Phawx ON shows for the plugin before it runs */
+/* FileDescription is the name Phawx ON shows for the plugin before it runs, and
+   PhawxWarning is added to the question it asks before turning the plugin on */
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 1,0,0,0
 PRODUCTVERSION 1,0,0,0
@@ -13,6 +14,7 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Phawx"
       VALUE "FileDescription", "RyzenAdj"
+      VALUE "PhawxWarning", "Uses the WinRing0 driver, and the InpOut driver if you turn on Read power table. While this plugin runs, any program on this PC can use these drivers to take full control of it."
       VALUE "FileVersion", "1.0"
       VALUE "InternalName", "ryzenadj"
       VALUE "OriginalFilename", "ryzenadj.dll"
