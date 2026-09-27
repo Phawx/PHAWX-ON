@@ -1385,7 +1385,10 @@ static void press(int x, int y, int hold)
     int i = hit_row(y);
     down_row = i;
     if (i < 0 || !selectable(rows[i])) return;
-    if (sel != i) { commit_pending(); sel = i; }
+    if (sel != i) commit_pending();
+    /* committing the old row can ask for confirmation: this press then only closes over it */
+    if (conf) { down_row = -1; drag = DR_NONE; inval(); return; }
+    sel = i;
     ph_ctl *c = rows[i];
     if (on_pin(i, x, y)) {
         /* the pin reacts to a tap; holding it does not reset anything */

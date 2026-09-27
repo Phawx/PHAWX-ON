@@ -14,7 +14,7 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Phawx"
       VALUE "FileDescription", "RyzenAdj"
-      VALUE "PhawxWarning", "Uses the WinRing0 driver, and the InpOut driver if you turn on Read power table. While this plugin runs, any program on this PC can use these drivers to take full control of it."
+      VALUE "PhawxWarning", "Uses the WinRing0 driver while it runs. Read power table also installs the InpOut driver, which stays installed and loads at every boot. Any program on this PC can use these drivers to take full control of it."
       VALUE "FileVersion", "1.0"
       VALUE "InternalName", "ryzenadj"
       VALUE "OriginalFilename", "ryzenadj.dll"

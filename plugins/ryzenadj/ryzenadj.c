@@ -27,13 +27,14 @@ typedef void  (__stdcall *fn_void)(void);
 enum { FAM_RAVEN = 0, FAM_PICASSO = 1, FAM_DALI = 4, FAM_LUCIENNE = 5 };
 
 /* the CPUs libryzenadj 0.19 knows (lib/cpuid.c), with the top of the range the
-   built-in AMD control offers them, in W */
-static const struct { uint8_t fam, model, w; } cpus[] = {
-    { 0x17, 0x11, 65 }, { 0x17, 0x18, 65 }, { 0x17, 0x20, 65 }, { 0x17, 0x60, 65 }, { 0x17, 0x68, 65 },
-    { 0x17, 0x90, 30 }, { 0x17, 0x91, 30 }, { 0x17, 0xA0, 30 },
-    { 0x19, 0x40, 65 }, { 0x19, 0x44, 65 }, { 0x19, 0x50, 65 }, { 0x19, 0x61, 180 },
-    { 0x19, 0x74, 65 }, { 0x19, 0x75, 65 }, { 0x19, 0x78, 65 },
-    { 0x1A, 0x20, 65 }, { 0x1A, 0x24, 65 }, { 0x1A, 0x44, 180 }, { 0x1A, 0x60, 65 }, { 0x1A, 0x70, 140 },
+   built-in AMD control offers them, in W, and whether init_table supports them
+   (not Van Gogh, Mendocino, Dragon Range or Fire Range: lib/api.c) */
+static const struct { uint8_t fam, model, w, table; } cpus[] = {
+    { 0x17, 0x11, 65, 1 }, { 0x17, 0x18, 65, 1 }, { 0x17, 0x20, 65, 1 }, { 0x17, 0x60, 65, 1 }, { 0x17, 0x68, 65, 1 },
+    { 0x17, 0x90, 30, 0 }, { 0x17, 0x91, 30, 0 }, { 0x17, 0xA0, 30, 0 },
+    { 0x19, 0x40, 65, 1 }, { 0x19, 0x44, 65, 1 }, { 0x19, 0x50, 65, 1 }, { 0x19, 0x61, 180, 0 },
+    { 0x19, 0x74, 65, 1 }, { 0x19, 0x75, 65, 1 }, { 0x19, 0x78, 65, 1 },
+    { 0x1A, 0x20, 65, 1 }, { 0x1A, 0x24, 65, 1 }, { 0x1A, 0x44, 180, 0 }, { 0x1A, 0x60, 65, 1 }, { 0x1A, 0x70, 140, 1 },
 };
 
 static struct {
@@ -93,10 +94,14 @@ static DWORD WINAPI worker(void *arg)
     }
 }
 
-static int run(int (*fn)(void), DWORD ms)
+/* the job fields belong to whoever set busy; after a timeout nobody does again */
+static int run_job(int (*fn)(void), fn_set s, fn_get g, uint32_t v, float *f, DWORD ms)
 {
     if (!wk || InterlockedCompareExchange(&busy, 1, 0)) return -1;
     job = fn;
+    job_set = s;
+    job_get = g;
+    job_v = v;
     SetEvent(wk_go);
     if (WaitForSingleObject(wk_done, ms) != WAIT_OBJECT_0) {
         stuck = 1;
@@ -104,9 +109,13 @@ static int run(int (*fn)(void), DWORD ms)
         phx_logf(H, SELF, "libryzenadj did not return within %lu ms, no longer calling it", ms);
         return -1;
     }
+    int rc = job_rc;
+    if (f) *f = job_f;
     InterlockedExchange(&busy, 0);
-    return job_rc;
+    return rc;
 }
+
+static int run(int (*fn)(void), DWORD ms) { return run_job(fn, NULL, NULL, 0, NULL, ms); }
 
 /* The SMU mailbox has no owner. Tools that share it take this mutex around each
    transaction, and so does Phawx ON's built-in SMU code. A mutex belongs to the
@@ -175,17 +184,15 @@ static int j_close(void)
 static int set_hw(fn_set f, uint32_t v)
 {
     if (!f) return -1;
-    job_set = f;
-    job_v = v;
-    return run(j_set, CALL_MS);
+    return run_job(j_set, f, NULL, v, NULL, CALL_MS);
 }
 
 static int get_hw(fn_get f, float *out)
 {
+    float v;
     if (!have_table || !f) return -1;
-    job_get = f;
-    if (run(j_get, CALL_MS) || !valid(job_f)) return -1;
-    *out = job_f;
+    if (run_job(j_get, NULL, f, 0, &v, CALL_MS) || !valid(v)) return -1;
+    *out = v;
     return 0;
 }
 
@@ -293,7 +300,8 @@ static int PHX_CALL set_table(phx_control *c, int32_t v)
     if (v == table_saved) return 0;
     table_saved = v;
     H->cfg_set_int(SELF, "table", v);
-    if (v != table_start) H->toast(SELF, L"Restart Phawx ON to apply");
+    if (!v && table_start) H->toast(SELF, L"Restart to apply. InpOut stays installed");
+    else if (v != table_start) H->toast(SELF, L"Restart Phawx ON to apply");
     return 0;
 }
 
@@ -423,11 +431,18 @@ PHX_EXPORT int PHX_CALL phx_plugin_init(const phx_host *host, phx_plugin *self, 
         host->set_status(self, L"not needed, Phawx ON controls this APU itself");
         return PHX_UNSUPPORTED;
     }
+    int can_table = 0;
     for (int i = 0; i < (int)(sizeof cpus / sizeof cpus[0]); i++)
-        if (cpus[i].fam == pf->family && cpus[i].model == pf->model) hi = cpus[i].w * 1000;
+        if (cpus[i].fam == pf->family && cpus[i].model == pf->model) { hi = cpus[i].w * 1000; can_table = cpus[i].table; }
     if (!hi) { host->set_status(self, L"RyzenAdj does not support this CPU"); return PHX_UNSUPPORTED; }
 
-    table_start = table_saved = host->cfg_get_int(self, "table", 0) != 0;
+    /* libryzenadj cannot read this CPU's table, so InpOut would be installed for nothing */
+    table_start = table_saved = can_table && host->cfg_get_int(self, "table", 0) != 0;
+    if (!can_table) {
+        ctl[C_TABLE].flags |= PHX_F_HIDDEN;
+        ctl[C_PWR].flags |= PHX_F_HIDDEN;
+        ctl[C_TEMP].flags |= PHX_F_HIDDEN;
+    }
     lstrcpynW(dir, host->plugin_dir(self), MAX_PATH);
     /* libryzenadj loads inpoutx64.DLL by bare name, for the power table only. Loading
        it first from here by full path makes that find this copy instead of searching
@@ -510,6 +525,7 @@ PHX_EXPORT int PHX_CALL phx_plugin_init(const phx_host *host, phx_plugin *self, 
     if (have_table) host->set_status(self, L"InpOut driver stays installed after exit");
     else if (table_start && !inpout) host->set_status(self, L"no inpoutx64.dll, limits are not restored");
     else if (table_start) host->set_status(self, L"no power table, limits are not restored");
+    else if (!can_table) host->set_status(self, L"no power table on this CPU, limits are not restored");
     else host->set_status(self, L"limits not read back or restored on exit");
     *out = &info;
     return PHX_OK;
