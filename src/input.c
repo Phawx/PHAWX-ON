@@ -53,7 +53,8 @@ static uint64_t next_scan;
 
 static uint32_t prev_all, suppress;
 static uint32_t nav_prev;
-static uint64_t nav_next[IN_RESET + 1];
+static uint64_t nav_next[IN_NAV_COUNT];
+static int pad_hold, key_hold, kbd_on;
 
 static int cap_phase;
 static uint32_t cap_peak;
@@ -156,15 +157,25 @@ static uint32_t nav_bits(uint32_t b)
     if (b & XINPUT_GAMEPAD_B) n |= 1u << IN_BACK;
     if (b & XINPUT_GAMEPAD_LEFT_SHOULDER) n |= 1u << IN_TAB_PREV;
     if (b & XINPUT_GAMEPAD_RIGHT_SHOULDER) n |= 1u << IN_TAB_NEXT;
-    if (b & XINPUT_GAMEPAD_Y) n |= 1u << IN_AUX;
-    if (b & XINPUT_GAMEPAD_X) n |= 1u << IN_RESET;
+    if (b & XINPUT_GAMEPAD_Y) n |= 1u << IN_PIN;
     return n;
+}
+
+/* X (the left face button on any XInput pad) resets only when held, so the UI
+   gets its press and its release rather than a single nav event */
+static void pad_hold_edge(uint32_t all)
+{
+    int h = (all & ~suppress & XINPUT_GAMEPAD_X) != 0;
+    if (h == pad_hold) return;
+    pad_hold = h;
+    PostMessageW(owner, WM_PH_HOLD, HOLD_PAD, h);
 }
 
 static void do_nav(uint32_t all, uint64_t now)
 {
     uint32_t n = nav_bits(all & ~suppress);
-    for (int k = 0; k <= IN_RESET; k++) {
+    pad_hold_edge(all);
+    for (int k = 0; k < IN_NAV_COUNT; k++) {
         uint32_t m = 1u << k;
         if (!(n & m)) continue;
         int dir = k <= IN_RIGHT;
@@ -381,10 +392,35 @@ static void touch_report(touch_dev *d, PCHAR rep, ULONG len)
     }
 }
 
+/* R on the keyboard. The panel never takes focus, so while it is open the main
+   window listens passively (RIDEV_INPUTSINK): nothing is hooked or swallowed. */
+static void kbd_register(int on)
+{
+    if (!owner || on == kbd_on) return;
+    RAWINPUTDEVICE r;
+    r.usUsagePage = HID_USAGE_PAGE_GENERIC;
+    r.usUsage = HID_USAGE_GENERIC_KEYBOARD;
+    r.dwFlags = on ? RIDEV_INPUTSINK : RIDEV_REMOVE;
+    r.hwndTarget = on ? owner : NULL;
+    if (RegisterRawInputDevices(&r, 1, sizeof r) || !on) kbd_on = on;
+    if (key_hold) { key_hold = 0; PostMessageW(owner, WM_PH_HOLD, HOLD_KEY, 0); }
+}
+
+static void on_key(const RAWINPUT *ri)
+{
+    const RAWKEYBOARD *k = &ri->data.keyboard;
+    /* hDevice is NULL for input injected with SendInput */
+    if (!menu_open || !ri->header.hDevice || k->VKey != 'R') return;
+    int down = !(k->Flags & RI_KEY_BREAK);
+    if (down == key_hold) return;   /* autorepeat */
+    key_hold = down;
+    PostMessageW(owner, WM_PH_HOLD, HOLD_KEY, down);
+}
+
 void input_on_rawinput(HWND h, LPARAM lp)
 {
     (void)h;
-    if (!hp_val) return;
+    if (!hp_val && !kbd_on) return;
     UINT sz = 0;
     if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, NULL, &sz, sizeof(RAWINPUTHEADER)) != 0 || !sz) return;
     if (sz > rbuf_n) {
@@ -396,7 +432,11 @@ void input_on_rawinput(HWND h, LPARAM lp)
     }
     if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, rbuf, &sz, sizeof(RAWINPUTHEADER)) == (UINT)-1) return;
     RAWINPUT *ri = (RAWINPUT *)rbuf;
-    if (ri->header.dwType != RIM_TYPEHID || !ri->header.hDevice) return;
+    if (ri->header.dwType == RIM_TYPEKEYBOARD) {
+        if (sz >= sizeof(RAWINPUTHEADER) + sizeof(RAWKEYBOARD)) on_key(ri);
+        return;
+    }
+    if (!hp_val || ri->header.dwType != RIM_TYPEHID || !ri->header.hDevice) return;
     touch_dev *d = touch_get(ri->header.hDevice);
     if (!d->ok) return;
     DWORD each = ri->data.hid.dwSizeHid, cnt = ri->data.hid.dwCount;
@@ -466,7 +506,9 @@ void input_menu_open(int open)
     menu_open = open != 0;
     nav_prev = nav_bits(prev_all);
     suppress = prev_all;
+    pad_hold = 0;
     if (menu_open) tg.armed = 0;
+    kbd_register(menu_open);
     rearm();
 }
 
@@ -474,6 +516,7 @@ void input_shutdown(void)
 {
     if (owner) {
         KillTimer(owner, TM_INPUT);
+        kbd_register(0);
         if (hp_val) raw_register(0);
     }
     cur_period = (UINT)-1;

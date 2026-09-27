@@ -2,6 +2,9 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <wchar.h>
+#include <winver.h>
+#include <objbase.h>
+#include <shlobj.h>
 
 static HANDLE heap;
 
@@ -182,6 +185,77 @@ int gpu_class_keys(const wchar_t *ven, wchar_t keys[][128], int max)
     }
     RegCloseKey(cls);
     return n;
+}
+
+int ph_exe_dir(wchar_t *out, int n)
+{
+    wchar_t p[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, p, MAX_PATH);
+    if (!len || len >= MAX_PATH) return -1;
+    while (len && p[len - 1] != L'\\' && p[len - 1] != L'/') len--;
+    if (len) len--;
+    p[len] = 0;
+    if ((int)len >= n) return -1;
+    lstrcpynW(out, p, n);
+    return 0;
+}
+
+/* Under Program Files, where only administrators can write. Anything that runs
+   elevated from a folder must live there (autostart task, plugins). */
+int ph_path_protected(const wchar_t *path)
+{
+    /* known folders come from HKLM; %ProgramFiles% can be overridden per user */
+    static const GUID ids[] = {
+        { 0x905e63b6, 0xc1bf, 0x494e, { 0xb2, 0x9c, 0x65, 0xb7, 0x32, 0xd3, 0xd2, 0x1a } },  /* ProgramFiles */
+        { 0x7c5a40ef, 0xa0fb, 0x4bfc, { 0x87, 0x4a, 0xc0, 0xf2, 0xe0, 0xb9, 0xfa, 0x8e } },  /* ProgramFilesX86 */
+    };
+    for (int i = 0; i < PH_ARRAY(ids); i++) {
+        PWSTR pf = NULL;
+        int hit = 0;
+        if (SUCCEEDED(SHGetKnownFolderPath(&ids[i], 0, NULL, &pf)) && pf) {
+            int n = lstrlenW(pf);
+            hit = n > 2 && !_wcsnicmp(path, pf, (size_t)n) && path[n] == L'\\';
+        }
+        CoTaskMemFree(pf);
+        if (hit) return 1;
+    }
+    return 0;
+}
+
+/* Reads the version resource without running any code from the file. */
+int ph_file_version(const wchar_t *path, int ver[3], wchar_t *desc, int ndesc)
+{
+    DWORD h = 0, sz = GetFileVersionInfoSizeW(path, &h);
+    int rc = -1;
+    if (desc && ndesc > 0) desc[0] = 0;
+    if (!sz || sz > (1u << 20)) return -1;
+    BYTE *b = ph_alloc(sz);
+    if (!b) return -1;
+    if (GetFileVersionInfoW(path, 0, sz, b)) {
+        VS_FIXEDFILEINFO *fi = NULL;
+        UINT n = 0;
+        if (ver && VerQueryValueW(b, L"\\", (void **)&fi, &n) && fi && n >= sizeof *fi && fi->dwSignature == 0xFEEF04BD) {
+            ver[0] = HIWORD(fi->dwProductVersionMS);
+            ver[1] = LOWORD(fi->dwProductVersionMS);
+            ver[2] = HIWORD(fi->dwProductVersionLS);
+            rc = 0;
+        }
+        WORD *tr = NULL;
+        if (desc && ndesc > 0 && VerQueryValueW(b, L"\\VarFileInfo\\Translation", (void **)&tr, &n) && tr && n >= 4) {
+            wchar_t q[64], *s = NULL;
+            UINT sl = 0;
+            ph_swprintf(q, PH_ARRAY(q), L"\\StringFileInfo\\%04x%04x\\FileDescription", tr[0], tr[1]);
+            if (VerQueryValueW(b, q, (void **)&s, &sl) && s && sl > 1) lstrcpynW(desc, s, ndesc);
+        }
+    }
+    ph_free(b);
+    return rc;
+}
+
+void ph_fmt_version(wchar_t *out, int n, const int ver[3])
+{
+    if (ver[2]) ph_swprintf(out, n, L"%d.%d.%d", ver[0], ver[1], ver[2]);
+    else ph_swprintf(out, n, L"%d.%d", ver[0], ver[1]);
 }
 
 void fmt_watts_mw(const ph_ctl *c, int32_t v, wchar_t *b, int n)

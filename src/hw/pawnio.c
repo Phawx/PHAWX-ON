@@ -1,5 +1,6 @@
 #include "phawx.h"
 #include "drv_priv.h"
+#include <string.h>
 
 typedef HRESULT (WINAPI *pio_version_t)(PULONG);
 typedef HRESULT (WINAPI *pio_open_t)(PHANDLE);
@@ -26,6 +27,15 @@ static int           pm_cache_ok;
 static _Thread_local uint32_t smn_index;
 
 char pawnio_name[32] = "PawnIO";
+char pawnio_ver[16];
+char pawnio_missing[64];   /* CPU modules that did not load, "A.bin, B.bin" */
+int  pawnio_state = DRV_MISSING;
+
+static void note_missing(const char *m)
+{
+    size_t n = strlen(pawnio_missing);
+    ph_snprintf(pawnio_missing + n, (int)(sizeof pawnio_missing - n), n ? ", %s" : "%s", m);
+}
 
 static int exe_dir(wchar_t *d)
 {
@@ -122,6 +132,7 @@ static int pio_open(void)
 {
     if (lib) return 0;
     wchar_t path[MAX_PATH];
+    pawnio_state = DRV_MISSING;
     if (!find_file(L"PawnIOLib.dll", path)) return -1;
     lib = LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!lib) return -1;
@@ -132,14 +143,22 @@ static int pio_open(void)
     p_close   = (pio_close_t)GetProcAddress(lib, "pawnio_close");
     if (!p_open || !p_load || !p_exec || !p_close) { pio_close(); return -1; }
 
-    HANDLE probe = NULL;
-    if (FAILED(p_open(&probe)) || !probe) { ph_log("pawnio: driver not available"); pio_close(); return -1; }
-    p_close(probe);
-
     ULONG ver = 0;
-    if (p_version && SUCCEEDED(p_version(&ver)))
-        ph_snprintf(pawnio_name, sizeof pawnio_name, "PawnIO %lu.%lu.%lu",
-                    (ver >> 16) & 0xFF, (ver >> 8) & 0xFF, ver & 0xFF);
+    if (p_version && SUCCEEDED(p_version(&ver))) {
+        unsigned ma = (ver >> 16) & 0xFF, mi = (ver >> 8) & 0xFF, pa = ver & 0xFF;
+        if (pa) ph_snprintf(pawnio_ver, sizeof pawnio_ver, "%u.%u.%u", ma, mi, pa);
+        else ph_snprintf(pawnio_ver, sizeof pawnio_ver, "%u.%u", ma, mi);
+        ph_snprintf(pawnio_name, sizeof pawnio_name, "PawnIO %s", pawnio_ver);
+    }
+
+    HANDLE probe = NULL;
+    if (FAILED(p_open(&probe)) || !probe) {
+        ph_log("pawnio: driver not available");
+        pio_close();
+        pawnio_state = DRV_STOPPED;
+        return -1;
+    }
+    p_close(probe);
 
     uint32_t r[4];
     cpuidex(0, 0, r);
@@ -149,21 +168,26 @@ static int pio_open(void)
     uint32_t fam = (r[0] >> 8) & 0xF;
     if (fam == 0xF) fam += (r[0] >> 20) & 0xFF;
 
+    pawnio_missing[0] = 0;
     if (intel) {
         load_module(M_MSR, L"IntelMSR.bin");
         load_module(M_MCHBAR, L"IntelMCHBAR.bin");
         uint64_t a = 0;
         if (exec(M_MCHBAR, "ioctl_get_mchbar_addr", NULL, 0, &a, 1) == 0) mchbar = a;
+        if (!mh[M_MSR]) note_missing("IntelMSR.bin");
     } else if (is_amd) {
         if (fam >= 0x17) load_module(M_MSR, L"AMDFamily17.bin");
         load_module(M_SMU, L"RyzenSMU.bin");
+        if (fam >= 0x17 && !mh[M_MSR]) note_missing("AMDFamily17.bin");
+        if (!mh[M_SMU]) note_missing("RyzenSMU.bin");
     }
     load_module(M_EC, L"LpcACPIEC.bin");
 
     for (int i = 0; i < M_N; i++)
-        if (mh[i]) return 0;
+        if (mh[i]) { pawnio_state = DRV_OK; return 0; }
     ph_log("pawnio: no modules loaded");
     pio_close();
+    pawnio_state = DRV_NOMODULES;
     return -1;
 }
 

@@ -94,6 +94,21 @@ static int ec_wr(const ec_bus *b, uint16_t off, uint8_t v)
     return rc;
 }
 
+/* shared with plugins: the ACPI EC through the same lock and protocol as the fan code */
+static const ec_bus acpi_ec = { EC_ACPI, ACPI_CMD, ACPI_DATA };
+
+int ph_ec_read(uint8_t reg, uint8_t *v)
+{
+    if (!v || !drv_ok()) return -1;
+    return ec_rd(&acpi_ec, reg, v);
+}
+
+int ph_ec_write(uint8_t reg, uint8_t v)
+{
+    if (!drv_ok()) return -1;
+    return ec_wr(&acpi_ec, reg, v);
+}
+
 /* ---------- device plugin table ---------- */
 
 typedef struct dev_def dev_def;

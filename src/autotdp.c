@@ -595,6 +595,25 @@ void autotdp_stop(void)
     notify(0);
 }
 
+/* Crash path. autotdp_stop would wait forever if the worker is the thread that
+   crashed (it sits in the crash filter), and it re-applies user values through
+   callbacks that may be what crashed. Only take the caps off. */
+void autotdp_crash_release(DWORD crashed_tid)
+{
+    if (!running) return;
+    if (stop_ev) SetEvent(stop_ev);
+    if (thr && GetThreadId(thr) != crashed_tid) WaitForSingleObject(thr, 1000);
+    dom_release(&dc);
+    dom_release(&dg);
+    park_apply(0);
+    if (epp_set) {
+        pw_restore(&sv_epp[0]);
+        pw_restore(&sv_epp[1]);
+        epp_set = 0;
+    }
+    InterlockedExchange(&running, 0);
+}
+
 int autotdp_running(void) { return running != 0; }
 
 void autotdp_state(ph_auto_state *s)

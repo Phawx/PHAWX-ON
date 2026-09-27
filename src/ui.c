@@ -8,8 +8,11 @@
 #define PAD     16
 #define MAXROWS 512
 
+#define IND     20      /* label indent: the pin column */
+#define PIN_HIT 22      /* taps left of PAD + this hit the pin */
+
 enum { TM_ANIM = 1, TM_LIVE, TM_COMMIT, TM_TOAST, TM_HOLD };
-enum { WM_UI_SHOW = WM_APP + 40, WM_UI_TOAST, WM_UI_NAV, WM_UI_REFRESH };
+enum { WM_UI_SHOW = WM_APP + 40, WM_UI_TOAST, WM_UI_NAV, WM_UI_REFRESH, WM_UI_HOLD };
 enum { DR_NONE, DR_TAP, DR_SCROLL, DR_SLIDER };
 
 #define C_BG     RGB(24, 24, 28)
@@ -26,7 +29,7 @@ enum { DR_NONE, DR_TAP, DR_SCROLL, DR_SLIDER };
 #define C_TOAST  RGB(58, 60, 72)
 
 static const wchar_t *const tab_names[PG_COUNT] = {
-    L"Quick", L"CPU", L"Power", L"GPU", L"Display", L"System", L"Settings"
+    L"Quick", L"CPU", L"Power", L"GPU", L"Display", L"System", L"Plugins", L"Settings"
 };
 
 static HWND hw, toast_hw;
@@ -41,12 +44,22 @@ static RECT mon;
 static int pw = 1, ph_h = 1, shown_w, anim_dir;
 
 static int page = PG_QUICK;
-static int tabs[PG_COUNT], ntabs;
+static int tabs[PG_COUNT], ntabs, tab_l[PG_COUNT], tab_r[PG_COUNT];
 static ph_ctl *rows[MAXROWS], *tmp_rows[MAXROWS];
 static int nrows, row_y[MAXROWS], row_h[MAXROWS], row_vx[MAXROWS], content_h;
 static int32_t hwv[MAXROWS];
 static uint8_t hwok[MAXROWS];
-static int sel = -1, scroll;
+static const wchar_t *row_from[MAXROWS];    /* pinned rows: where the control lives */
+static int sel = -1, scroll, sel_hint = -1;
+
+#define MAXPINROWS 64
+static wchar_t pin_from[MAXPINROWS][48];
+static ph_ctl pin_hdr, pin_help;
+
+/* hold-to-reset: sources held (HOLD_*), when it started, how long it takes */
+static int hold_src, hold_ms;
+static uint64_t hold_t0;
+static ph_ctl *hold_ctl;
 
 static ph_ctl *pend, *conf;
 static int32_t pend_v, conf_v;
@@ -60,7 +73,7 @@ static HFONT toast_font;
 static wchar_t live[160];
 static int live_n;
 
-static int drag, down_x, down_y, down_scroll, down_row, held;
+static int drag, down_x, down_y, down_scroll, down_row;
 
 static int S(int v) { return MulDiv(v, dpi, 96); }
 static int on_ui(void) { return GetCurrentThreadId() == ui_tid; }
@@ -161,8 +174,22 @@ static int row_visible(const ph_ctl *c)
     return 1;
 }
 
-static int selectable(const ph_ctl *c) { return c->type != CT_HEADER && c->type != CT_INFO; }
+static int selectable(const ph_ctl *c) { return c->type != CT_HEADER && c->type != CT_INFO && c->type != CT_STATUS; }
 static int locked(const ph_ctl *c) { return (c->flags & CF_AUTOTDP) && c->type != CT_INFO && autotdp_running(); }
+
+/* a persisted setting that is away from Default; rows without a key (plugin
+   switches, links) have nothing to reset */
+static int resettable(const ph_ctl *c)
+{
+    return c && c->key && selectable(c) && c->type != CT_ACTION && c->active && !locked(c);
+}
+
+static int pin_help_get(ph_ctl *c, int32_t *out) { (void)c; *out = TONE_DIM; return 0; }
+static void pin_help_fmt(const ph_ctl *c, int32_t v, wchar_t *b, int n)
+{
+    (void)c; (void)v;
+    lstrcpynW(b, L"Tap a setting's pin or press Y to add it here", n);
+}
 
 static int page_rows(int pg, ph_ctl **out)
 {
@@ -174,7 +201,37 @@ static int page_rows(int pg, ph_ctl **out)
         out[n++] = c;
     }
     if (n > 0 && out[n - 1]->type == CT_HEADER) n--;
+    if (pg != PG_QUICK) return n;
+    /* pinned controls follow the built-in Quick rows, in the order they were pinned;
+       advanced ones stay because the user asked for them, unavailable ones do not */
+    if (!pin_hdr.label) {
+        pin_hdr = (ph_ctl){ .label = L"Pinned", .type = CT_HEADER, .page = PG_QUICK };
+        pin_help = (ph_ctl){ .label = L"Pins", .type = CT_STATUS, .page = PG_QUICK, .get = pin_help_get, .fmt = pin_help_fmt };
+    }
+    if (n < MAXROWS) out[n++] = &pin_hdr;
+    int shown = 0;
+    for (int i = 0; i < pin_count() && n < MAXROWS; i++) {
+        ph_ctl *c = ph_ctl_find(pin_at(i));
+        if (!c || (c->flags & CF_HIDDEN) || !ph_ctl_pinnable(c)) continue;
+        out[n++] = c;
+        shown++;
+    }
+    if (!shown && n < MAXROWS) out[n++] = &pin_help;
     return n;
+}
+
+/* "CPU · Power limits": the page and section a pinned control comes from */
+static void where_from(const ph_ctl *c, wchar_t *b, int n)
+{
+    const wchar_t *sec = NULL;
+    for (int i = 0, k = ph_ctl_count(); i < k; i++) {
+        ph_ctl *o = ph_ctl_at(i);
+        if (o == c) break;
+        if (o->page == c->page && o->type == CT_HEADER && !(o->flags & CF_HIDDEN)) sec = o->label;
+    }
+    const wchar_t *pg = c->page < PG_COUNT ? tab_names[c->page] : L"";
+    if (sec && lstrcmpiW(sec, pg)) ph_swprintf(b, n, L"%s \x00B7 %s", pg, sec);
+    else lstrcpynW(b, pg, n);
 }
 
 static int32_t base_val(int i)
@@ -202,8 +259,9 @@ static void refresh_hw(int info_only)
 {
     for (int i = 0; i < nrows; i++) {
         ph_ctl *c = rows[i];
-        if (info_only && c->type != CT_INFO) continue;
-        if (!c->get || c->type == CT_HEADER || (c->type != CT_INFO && c->active)) {
+        int live = c->type == CT_INFO || c->type == CT_STATUS;
+        if (info_only && !live) continue;
+        if (!c->get || c->type == CT_HEADER || (!live && c->active)) {
             if (!info_only) hwok[i] = 0;
             continue;
         }
@@ -213,6 +271,9 @@ static void refresh_hw(int info_only)
     }
 }
 
+/* a second line under the label: a pinned row's origin, or a status (plugins) */
+static int two_line(int i) { return row_from[i] || rows[i]->sub; }
+
 static void layout(void)
 {
     int y = 0;
@@ -220,9 +281,10 @@ static void layout(void)
         int h;
         switch (rows[i]->type) {
         case CT_HEADER: h = i == 0 ? 30 : 40; break;
-        case CT_SLIDER: h = 64; break;
+        case CT_SLIDER: h = two_line(i) ? 78 : 64; break;
         case CT_INFO: h = 36; break;
-        default: h = 50; break;
+        case CT_STATUS: h = 38; break;
+        default: h = two_line(i) ? 60 : 50; break;
         }
         row_y[i] = y;
         row_h[i] = S(h);
@@ -265,9 +327,23 @@ static void rebuild(void)
     for (int i = 0; i < ntabs; i++) if (tabs[i] == page) ok = 1;
     if (!ok && ntabs) { page = tabs[0]; keep = NULL; scroll = 0; }
     nrows = page_rows(page, rows);
+    for (int i = 0, np = 0, pinned = 0; i < nrows; i++) {
+        row_from[i] = NULL;
+        if (rows[i] == &pin_hdr) pinned = 1;
+        else if (pinned && ph_ctl_pinnable(rows[i]) && np < MAXPINROWS) {
+            where_from(rows[i], pin_from[np], PH_ARRAY(pin_from[np]));
+            row_from[i] = pin_from[np++];
+        }
+    }
     refresh_hw(0);
     sel = -1;
     for (int i = 0; i < nrows; i++) if (rows[i] == keep) sel = i;
+    /* the row just went away (unpinned from Quick): stay where it was */
+    if (sel < 0 && keep && sel_hint >= 0 && nrows) {
+        sel = first_sel(sel_hint < nrows ? sel_hint : nrows - 1, 1);
+        if (sel < 0) sel = first_sel(nrows - 1, -1);
+    }
+    sel_hint = -1;
     if (sel < 0) sel = first_sel(0, 1);
     if (pend) {
         int f = 0;
@@ -283,7 +359,8 @@ static void rebuild(void)
 static void apply_val(ph_ctl *c, int32_t v, int confirmed)
 {
     if (!c) return;
-    if ((c->flags & CF_DANGER) && !confirmed) {
+    /* switching a dangerous toggle off only undoes it, so it needs no confirmation */
+    if ((c->flags & (CF_DANGER | CF_CONFIRM)) && !confirmed && !(c->type == CT_TOGGLE && v == 0)) {
         conf = c;
         conf_v = v;
         conf_btn = 0;
@@ -337,7 +414,7 @@ static void reset_sel(void)
 {
     if (sel < 0 || sel >= nrows) return;
     ph_ctl *c = rows[sel];
-    if (!selectable(c) || c->type == CT_ACTION || locked(c)) return;
+    if (!c->key || !selectable(c) || c->type == CT_ACTION || locked(c)) return;
     if (pend == c) { pend = NULL; KillTimer(hw, TM_COMMIT); }
     if (!c->active) return;
     ph_ctl_reset(c);
@@ -346,6 +423,97 @@ static void reset_sel(void)
     ph_swprintf(m, PH_ARRAY(m), L"%s set to Default", c->label ? c->label : L"Setting");
     ui_toast(m);
     rebuild();
+    inval();
+}
+
+/* ---------- hold to reset ---------- */
+
+static void hold_end(void)
+{
+    if (!hold_src && !hold_ctl) return;
+    hold_src = 0;
+    hold_ctl = NULL;
+    if (hw) KillTimer(hw, TM_HOLD);
+    inval();
+}
+
+static ph_ctl *cur(void);
+
+/* A hold belongs to the row that was selected when it started and ends if the
+   selection moves, the source is released, a dialog opens or the menu closes. */
+static void hold_start(int src, int ms)
+{
+    ph_ctl *c = cur();
+    if (!c || conf) return;
+    if (!hold_src) {
+        hold_t0 = ph_ms();
+        hold_ms = ms;
+        hold_ctl = c;
+        SetTimer(hw, TM_HOLD, 16, NULL);
+    }
+    hold_src |= src;
+    inval();
+}
+
+static void hold_stop(int src)
+{
+    hold_src &= ~src;
+    if (!hold_src) hold_end();
+}
+
+static int held;
+
+static void hold_tick(void)
+{
+    if (!hold_src || !vis || conf || cur() != hold_ctl) { hold_end(); return; }
+    if (ph_ms() - hold_t0 < (uint64_t)hold_ms) { inval(); return; }
+    int ptr = hold_src & HOLD_PTR;
+    hold_end();
+    if (ptr) held = 1;    /* the finger or button coming up is not a tap */
+    reset_sel();
+}
+
+/* 0..1000 while the selected row is being held towards Default */
+static int hold_progress(void)
+{
+    if (!hold_src || !hold_ctl || !resettable(hold_ctl) || hold_ms <= 0) return -1;
+    uint64_t e = ph_ms() - hold_t0;
+    return e >= (uint64_t)hold_ms ? 1000 : (int)(e * 1000 / (uint64_t)hold_ms);
+}
+
+void ui_hold(int src, int down)
+{
+    if (!hw) return;
+    if (!on_ui()) { PostMessageW(hw, WM_UI_HOLD, (WPARAM)src, (LPARAM)down); return; }
+    if (!down) { hold_stop(src); return; }
+    if (!vis || conf) return;
+    ph_ctl *c = cur();
+    if (!c) return;
+    if (!resettable(c)) {
+        if (locked(c)) ui_toast(L"Managed by AutoTDP");
+        else if (c->key && c->type != CT_ACTION && !c->active) ui_toast(L"Already at Default");
+        return;
+    }
+    hold_start(src, HOLD_MS);
+}
+
+/* ---------- pins ---------- */
+
+static void pin_sel(void)
+{
+    ph_ctl *c = cur();
+    if (!c) return;
+    if (!ph_ctl_pinnable(c)) {
+        if (c->page == PG_QUICK) ui_toast(L"Already on the Quick page");
+        else ui_toast(L"This row can't be pinned");
+        return;
+    }
+    int r = pin_toggle(c->key);
+    if (r < 0) { ui_toast(L"The Quick page is full of pins"); return; }
+    ui_toast(r ? L"Pinned to Quick" : L"Removed from Quick");
+    sel_hint = sel;
+    rebuild();
+    if (sel >= 0) ensure_visible(sel);
     inval();
 }
 
@@ -460,6 +628,7 @@ void ui_nav(int a)
     if (a == IN_TOGGLE_MENU) { ui_toggle(); return; }
     if (!vis) return;
     if (conf) {
+        hold_end();
         switch (a) {
         case IN_LEFT: case IN_UP: conf_btn = 0; break;
         case IN_RIGHT: case IN_DOWN: conf_btn = 1; break;
@@ -480,6 +649,7 @@ void ui_nav(int a)
     case IN_TAB_NEXT: switch_tab(1); break;
     case IN_AUX: toggle_autotdp(); break;
     case IN_RESET: reset_sel(); break;
+    case IN_PIN: pin_sel(); break;
     }
     inval();
 }
@@ -601,33 +771,109 @@ static COLORREF value_text(int i, wchar_t *b, int n)
     return C_ACC;
 }
 
+/* the slider track; drawing and dragging must agree on it */
+static void track_x(int *a, int *b)
+{
+    *a = S(PAD) + S(IND) + S(8);
+    *b = pw - S(PAD) - S(8);
+}
+
+static void draw_pin(HDC m, int cx, int cy, int filled, COLORREF col)
+{
+    /* a push pin: cap, body, flared base, needle (units of 1/96 inch) */
+    static const signed char shape[][2] = {
+        { -3, -7 }, { 3, -7 }, { 3, -6 }, { 2, -6 }, { 2, -1 }, { 5, 2 }, { 5, 3 },
+        { -5, 3 }, { -5, 2 }, { -2, -1 }, { -2, -6 }, { -3, -6 }
+    };
+    POINT pt[PH_ARRAY(shape)];
+    for (int i = 0; i < PH_ARRAY(shape); i++) {
+        pt[i].x = cx + S(shape[i][0]);
+        pt[i].y = cy + S(shape[i][1]);
+    }
+    HPEN p = CreatePen(PS_SOLID, S(1) > 0 ? S(1) : 1, col);
+    HGDIOBJ op = SelectObject(m, p);
+    HGDIOBJ ob = SelectObject(m, GetStockObject(filled ? DC_BRUSH : NULL_BRUSH));
+    SetDCBrushColor(m, col);
+    Polygon(m, pt, PH_ARRAY(pt));
+    MoveToEx(m, cx, cy + S(3), NULL);
+    LineTo(m, cx, cy + S(9));
+    SelectObject(m, ob);
+    SelectObject(m, op);
+    DeleteObject(p);
+}
+
+static void draw_cross(HDC m, int cx, int cy, COLORREF col)
+{
+    int r = S(4);
+    HPEN p = CreatePen(PS_SOLID, S(2) > 0 ? S(2) : 1, col);
+    HGDIOBJ o = SelectObject(m, p);
+    MoveToEx(m, cx - r, cy - r, NULL);
+    LineTo(m, cx + r + 1, cy + r + 1);
+    MoveToEx(m, cx + r, cy - r, NULL);
+    LineTo(m, cx - r - 1, cy + r + 1);
+    SelectObject(m, o);
+    DeleteObject(p);
+}
+
+static COLORREF tone_color(int t) { return t == TONE_GOOD ? C_ACC : t == TONE_BAD ? C_DANGER : C_DIM; }
+
+static void draw_status(HDC m, int i, int y, int h, int x0, int x1)
+{
+    ph_ctl *c = rows[i];
+    int tone = hwok[i] ? hwv[i] : TONE_DIM;
+    wchar_t t[160];
+    t[0] = 0;
+    if (c->fmt) c->fmt(c, tone, t, PH_ARRAY(t));
+    if (!t[0] && c->label) lstrcpynW(t, c->label, PH_ARRAY(t));
+    COLORREF col = tone_color(tone);
+    if (tone == TONE_BAD) draw_cross(m, S(PAD) + S(5), y + h / 2, col);
+    text(m, tone == TONE_DIM ? f_small : f_body, col, t, x0, y, x1, y + h, DT_LEFT);
+}
+
 static void draw_row(HDC m, int i, int y)
 {
     ph_ctl *c = rows[i];
-    int h = row_h[i], x0 = S(PAD), x1 = pw - S(PAD);
+    int h = row_h[i], x0 = S(PAD) + S(IND), x1 = pw - S(PAD);
     int lk = locked(c);
-    wchar_t v[128];
+    wchar_t v[128], sub[160];
     row_vx[i] = x1;
     if (c->type == CT_HEADER) {
         text(m, f_small, C_ACC, c->label, x0, y + h - S(24), x1, y + h - S(4), DT_LEFT);
         return;
     }
     if (i == sel) rrect(m, S(8), y + S(2), pw - S(8), y + h - S(2), S(12), C_SEL);
+    if (c->type == CT_STATUS) { draw_status(m, i, y, h, x0, x1); return; }
     COLORREF lc = lk ? C_FAINT : (c->flags & CF_DANGER) ? C_DANGER : C_TEXT;
     COLORREF vc = value_text(i, v, PH_ARRAY(v));
     int vw = v[0] ? text_w(m, f_body, v) : 0;
 
+    /* the label line, and the line under it for pinned rows and plugin status */
+    int tone = TONE_DIM;
+    sub[0] = 0;
+    if (row_from[i]) lstrcpynW(sub, row_from[i], PH_ARRAY(sub));
+    else if (c->sub) tone = c->sub(c, sub, PH_ARRAY(sub));
+    int two = two_line(i);
+    int lt = c->type == CT_SLIDER ? y + S(8) : two ? y + S(7) : y;
+    int lb = c->type == CT_SLIDER ? y + S(32) : two ? y + S(31) : y + h;
+    int st = c->type == CT_SLIDER ? y + S(28) : lb - S(2), sb = st + S(18);
+
+    if (ph_ctl_pinnable(c)) {
+        int on = pin_has(c->key);
+        draw_pin(m, S(PAD) + S(5), (lt + lb) / 2 - S(1), on, on ? C_ACC : i == sel ? C_DIM : C_FAINT);
+    }
+
     switch (c->type) {
     case CT_SLIDER: {
-        int ly = y + S(8), lb = y + S(32);
         int vx = x1 - vw;
         if (vx < x0 + (x1 - x0) / 3) vx = x0 + (x1 - x0) / 3;
         row_vx[i] = vx;
-        text(m, f_body, lc, c->label, x0, ly, vx - S(8), lb, DT_LEFT);
-        text(m, f_body, vc, v, vx, ly, x1, lb, DT_RIGHT);
+        text(m, f_body, lc, c->label, x0, lt, vx - S(8), lb, DT_LEFT);
+        text(m, f_body, vc, v, vx, lt, x1, lb, DT_RIGHT);
+        if (two) text(m, f_small, tone_color(tone), sub, x0, st, x1, sb, DT_LEFT);
         int32_t cv = pend == c ? pend_v : base_val(i);
-        int range = c->max - c->min;
-        int ty = y + S(46), kx0 = x0 + S(8), kx1 = x1 - S(8);
+        int range = c->max - c->min, kx0, kx1;
+        int ty = y + S(two ? 60 : 46);
+        track_x(&kx0, &kx1);
         int kx = range > 0 ? kx0 + (int)((int64_t)(cv - c->min) * (kx1 - kx0) / range) : kx0;
         kx = PH_CLAMP(kx, kx0, kx1);
         int on = (c->active || pend == c) && !lk;
@@ -648,7 +894,8 @@ static void draw_row(HDC m, int i, int y)
             lx -= dw + S(8);
         }
         row_vx[i] = sx;
-        text(m, f_body, lc, c->label, x0, y, lx, y + h, DT_LEFT);
+        text(m, f_body, lc, c->label, x0, lt, lx, lb, DT_LEFT);
+        if (two) text(m, f_small, tone_color(tone), sub, x0, st, lx, sb, DT_LEFT);
         COLORREF tc = on ? ((optdef || lk) ? C_FAINT : C_ACC) : C_TRACK;
         rrect(m, sx, sy, sx + sw, sy + sh, sh, tc);
         int r = sh / 2 - S(3);
@@ -661,7 +908,8 @@ static void draw_row(HDC m, int i, int y)
         int vx = x1 - total;
         if (vx < x0 + (x1 - x0) / 3) vx = x0 + (x1 - x0) / 3;
         row_vx[i] = vx;
-        text(m, f_body, lc, c->label, x0, y, vx - S(8), y + h, DT_LEFT);
+        text(m, f_body, lc, c->label, x0, lt, vx - S(8), lb, DT_LEFT);
+        if (two) text(m, f_small, tone_color(tone), sub, x0, st, vx - S(8), sb, DT_LEFT);
         COLORREF ac = lk ? C_FAINT : C_DIM;
         text(m, f_body, ac, L"\x2039", vx, y, vx + aw, y + h, DT_LEFT);
         text(m, f_body, vc, v, vx + aw, y, x1 - aw, y + h, DT_CENTER);
@@ -673,7 +921,8 @@ static void draw_row(HDC m, int i, int y)
         int vx = x1 - cw - (vw ? vw + S(10) : 0);
         if (vx < x0 + (x1 - x0) / 2) vx = x0 + (x1 - x0) / 2;
         row_vx[i] = vx;
-        text(m, f_bold, lc, c->label, x0, y, vx - S(8), y + h, DT_LEFT);
+        text(m, f_bold, lc, c->label, x0, lt, vx - S(8), lb, DT_LEFT);
+        if (two) text(m, f_small, tone_color(tone), sub, x0, st, vx - S(8), sb, DT_LEFT);
         if (vw) text(m, f_body, vc, v, vx, y, x1 - cw - S(10), y + h, DT_RIGHT);
         text(m, f_body, C_DIM, L"\x203A", x1 - cw, y, x1, y + h, DT_RIGHT);
         break;
@@ -687,6 +936,13 @@ static void draw_row(HDC m, int i, int y)
         text(m, f_small, C_TEXT, v, vx, y, x1, y + h, DT_RIGHT);
         break;
     }
+    }
+
+    int p = i == sel ? hold_progress() : -1;
+    if (p >= 0) {
+        int l = S(18), r = pw - S(18), by = y + h - S(7);
+        rrect(m, l, by, r, by + S(3), S(3), C_TRACK);
+        rrect(m, l, by, l + (int)((int64_t)(r - l) * p / 1000), by + S(3), S(3), C_ACC);
     }
 }
 
@@ -715,13 +971,16 @@ static void draw_confirm(HDC m)
     int by = t + (vh - bh) / 2;
     if (by < t) by = t;
     rrect(m, bx0, by, bx1, by + bh, S(16), C_ROW);
-    text(m, f_bold, C_DANGER, L"Confirm change", bx0 + S(16), by + S(12), bx1 - S(16), by + S(40), DT_LEFT);
+    int danger = (conf->flags & CF_DANGER) != 0;
+    text(m, f_bold, danger ? C_DANGER : C_TEXT, danger ? L"Confirm change" : L"Are you sure?",
+         bx0 + S(16), by + S(12), bx1 - S(16), by + S(40), DT_LEFT);
     wchar_t v[64], msg[256];
     v[0] = 0;
     if (conf->type == CT_SLIDER || conf->type == CT_CHOICE || conf->type == CT_TOGGLE)
         fmt_val(conf, conf_v, v, PH_ARRAY(v));
     const wchar_t *lbl = conf->label ? conf->label : L"Apply";
-    if (v[0]) ph_swprintf(msg, PH_ARRAY(msg), L"Set %s to %s? This can cause instability.", lbl, v);
+    if (conf->desc) lstrcpynW(msg, conf->desc, PH_ARRAY(msg));
+    else if (v[0]) ph_swprintf(msg, PH_ARRAY(msg), L"Set %s to %s? This can cause instability.", lbl, v);
     else ph_swprintf(msg, PH_ARRAY(msg), L"%s? This cannot be undone.", lbl);
     RECT mr = { bx0 + S(16), by + S(44), bx1 - S(16), by + S(112) };
     SelectObject(m, f_body);
@@ -730,12 +989,30 @@ static void draw_confirm(HDC m)
     int gy = by + bh - S(52), gh = S(40), mid = (bx0 + bx1) / 2;
     SetRect(&rc_no, bx0 + S(12), gy, mid - S(6), gy + gh);
     SetRect(&rc_yes, mid + S(6), gy, bx1 - S(12), gy + gh);
+    COLORREF yc = danger ? C_DANGER : C_ACC;
     if (conf_btn == 0) rrect(m, rc_no.left - S(2), rc_no.top - S(2), rc_no.right + S(2), rc_no.bottom + S(2), S(12), C_ACC);
-    else rrect(m, rc_yes.left - S(2), rc_yes.top - S(2), rc_yes.right + S(2), rc_yes.bottom + S(2), S(12), C_DANGER);
+    else rrect(m, rc_yes.left - S(2), rc_yes.top - S(2), rc_yes.right + S(2), rc_yes.bottom + S(2), S(12), yc);
     rrect(m, rc_no.left, rc_no.top, rc_no.right, rc_no.bottom, S(10), C_SEL);
     rrect(m, rc_yes.left, rc_yes.top, rc_yes.right, rc_yes.bottom, S(10), C_SEL);
     text(m, f_bold, C_TEXT, L"Cancel", rc_no.left, rc_no.top, rc_no.right, rc_no.bottom, DT_CENTER);
-    text(m, f_bold, C_DANGER, L"Apply", rc_yes.left, rc_yes.top, rc_yes.right, rc_yes.bottom, DT_CENTER);
+    text(m, f_bold, yc, danger ? L"Apply" : L"Turn on", rc_yes.left, rc_yes.top, rc_yes.right, rc_yes.bottom, DT_CENTER);
+}
+
+/* tab widths follow their labels, so eight names fit without ellipses */
+static void layout_tabs(HDC m)
+{
+    int w[PG_COUNT], sum = 0, x = 0;
+    for (int k = 0; k < ntabs; k++) {
+        w[k] = text_w(m, f_tab, tab_names[tabs[k]]);
+        sum += w[k];
+    }
+    int spare = pw - sum;
+    for (int k = 0; k < ntabs; k++) {
+        int r = spare > 0 ? x + w[k] + spare * (k + 1) / ntabs - spare * k / ntabs : pw * (k + 1) / ntabs;
+        tab_l[k] = x;
+        tab_r[k] = k == ntabs - 1 ? pw : r;
+        x = tab_r[k];
+    }
 }
 
 static void render(HDC m)
@@ -763,19 +1040,29 @@ static void render(HDC m)
 
     fill(m, 0, S(HDR_H), pw, t, C_HDR);
     fill(m, 0, t - 1, pw, t, C_ROW);
+    layout_tabs(m);
     for (int k = 0; k < ntabs; k++) {
-        int l = pw * k / ntabs, r = pw * (k + 1) / ntabs, cur_t = tabs[k] == page;
-        text(m, f_tab, cur_t ? C_TEXT : C_DIM, tab_names[tabs[k]], l, S(HDR_H), r, t - S(4), DT_CENTER);
-        if (cur_t) rrect(m, l + S(10), t - S(4), r - S(10), t, S(3), C_ACC);
+        int l = tab_l[k], r = tab_r[k], cur_t = tabs[k] == page;
+        const wchar_t *nm = tab_names[tabs[k]];
+        text(m, f_tab, cur_t ? C_TEXT : C_DIM, nm, l, S(HDR_H), r, t - S(4), DT_CENTER);
+        if (cur_t) {
+            int half = text_w(m, f_tab, nm) / 2 + S(4), mid = (l + r) / 2;
+            if (half > (r - l) / 2) half = (r - l) / 2;
+            rrect(m, mid - half, t - S(4), mid + half, t, S(3), C_ACC);
+        }
     }
 
     int fy = ph_h - S(FOOT_H);
     fill(m, 0, fy, pw, ph_h, C_HDR);
     const wchar_t *hint = L"LB / RB pages  \x00B7  B closes";
     ph_ctl *c = cur();
+    int pin = c && ph_ctl_pinnable(c), pinned = pin && pin_has(c->key);
     if (conf) hint = L"A confirms  \x00B7  B cancels";
     else if (c && locked(c)) hint = L"Locked while AutoTDP runs";
-    else if (c && c->active && (c->flags & CF_OPTIONAL) && c->type != CT_ACTION) hint = L"Hold or press Reset to restore Default";
+    else if (hold_progress() >= 0) hint = L"Keep holding to restore Default";
+    else if (resettable(c) && pin) hint = pinned ? L"Hold X or R: Default  \x00B7  Y unpins" : L"Hold X or R: Default  \x00B7  Y pins";
+    else if (resettable(c)) hint = L"Hold X or R to restore Default";
+    else if (pin) hint = pinned ? L"Y removes from Quick  \x00B7  LB / RB pages" : L"Y pins to Quick  \x00B7  LB / RB pages";
     text(m, f_small, C_FAINT, hint, S(PAD), fy, pw - S(PAD), ph_h, DT_CENTER);
 
     if (conf) draw_confirm(m);
@@ -887,7 +1174,7 @@ void ui_show(int show)
         conf = NULL;
         drag = DR_NONE;
         if (GetCapture() == hw) ReleaseCapture();
-        KillTimer(hw, TM_HOLD);
+        hold_end();
         KillTimer(hw, TM_LIVE);
         InterlockedExchange(&vis, 0);
         input_menu_open(0);
@@ -895,6 +1182,23 @@ void ui_show(int show)
         anim_dir = -1;
         SetTimer(hw, TM_ANIM, 10, NULL);
     }
+}
+
+/* open the menu on a given page (after "Restart Phawx ON" from the Plugins page) */
+void ui_show_page(int pg)
+{
+    if (!hw || !on_ui() || pg < 0 || pg >= PG_COUNT) return;
+    ui_show(1);
+    if (!vis || page == pg) return;
+    for (int i = 0; i < ntabs; i++)
+        if (tabs[i] == pg) {
+            page = pg;
+            sel = -1;
+            scroll = 0;
+            rebuild();
+            if (sel >= 0) ensure_visible(sel);
+            inval();
+        }
 }
 
 void ui_toggle(void)
@@ -1021,7 +1325,8 @@ static int hit_row(int y)
 static void slider_to(int i, int x)
 {
     ph_ctl *c = rows[i];
-    int kx0 = S(PAD) + S(8), kx1 = pw - S(PAD) - S(8);
+    int kx0, kx1;
+    track_x(&kx0, &kx1);
     int range = c->max - c->min;
     if (range <= 0 || kx1 <= kx0) return;
     int px = PH_CLAMP(x, kx0, kx1) - kx0;
@@ -1031,9 +1336,12 @@ static void slider_to(int i, int x)
     set_pending(c, v, 1);
 }
 
-static void press(int x, int y)
+static int on_pin(int x, const ph_ctl *c) { return x < S(PAD) + S(PIN_HIT) && ph_ctl_pinnable(c); }
+
+/* hold_ms: HOLD_MS for the mouse, HOLD_TOUCH_MS for touch and pen */
+static void press(int x, int y, int hold)
 {
-    KillTimer(hw, TM_HOLD);
+    hold_stop(HOLD_PTR);
     held = 0;
     down_x = x;
     down_y = y;
@@ -1047,12 +1355,14 @@ static void press(int x, int y)
     if (sel != i) { commit_pending(); sel = i; }
     ph_ctl *c = rows[i];
     int ry = top_y() + row_y[i] - scroll;
-    if (c->type == CT_SLIDER && !locked(c) && y >= ry + S(32)) {
+    if (on_pin(x, c)) {
+        /* the pin reacts to a tap; holding it does not reset anything */
+    } else if (c->type == CT_SLIDER && !locked(c) && y >= ry + S(two_line(i) ? 46 : 32)) {
         drag = DR_SLIDER;
         KillTimer(hw, TM_COMMIT);
         slider_to(i, x);
     } else {
-        SetTimer(hw, TM_HOLD, 600, NULL);
+        hold_start(HOLD_PTR, hold);
     }
     inval();
 }
@@ -1063,7 +1373,7 @@ static void move(int x, int y)
     if (drag == DR_SLIDER && sel >= 0 && sel < nrows) { slider_to(sel, x); return; }
     if (drag == DR_TAP && down_row >= 0 && (y - down_y > S(10) || down_y - y > S(10))) {
         drag = DR_SCROLL;
-        KillTimer(hw, TM_HOLD);
+        hold_stop(HOLD_PTR);
     }
     if (drag == DR_SCROLL) {
         scroll = down_scroll - (y - down_y);
@@ -1086,13 +1396,15 @@ static void tap(int x, int y)
         return;
     }
     if (y < top_y()) {
-        if (ntabs) goto_tab(x * ntabs / (pw > 0 ? pw : 1));
+        for (int k = 0; k < ntabs; k++)
+            if (x >= tab_l[k] && x < tab_r[k]) { goto_tab(k); break; }
         return;
     }
     if (y >= ph_h - S(FOOT_H)) return;
     int i = hit_row(y);
     if (i < 0 || i != down_row || i != sel) return;
     ph_ctl *c = rows[i];
+    if (on_pin(x, c)) { pin_sel(); return; }
     if (locked(c)) { ui_toast(L"Managed by AutoTDP"); return; }
     if (c->type == CT_CHOICE) {
         int aw = S(24);
@@ -1110,7 +1422,7 @@ static void tap(int x, int y)
 
 static void release(int x, int y)
 {
-    KillTimer(hw, TM_HOLD);
+    hold_stop(HOLD_PTR);
     int d = drag;
     drag = DR_NONE;
     if (d == DR_SLIDER) commit_pending();
@@ -1126,10 +1438,11 @@ static void pt_client(LPARAM l, int *x, int *y)
     *y = p.y;
 }
 
-static void key(WPARAM vk)
+static void key(WPARAM vk, LPARAM l)
 {
     int shift = GetKeyState(VK_SHIFT) < 0;
     switch (vk) {
+    case 'R': if (!(l & (1 << 30))) ui_hold(HOLD_KEY, 1); break;   /* bit 30: autorepeat */
     case VK_UP: ui_nav(IN_UP); break;
     case VK_DOWN: ui_nav(IN_DOWN); break;
     case VK_LEFT: ui_nav(IN_LEFT); break;
@@ -1155,7 +1468,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_DPICHANGED: return 0;
     case WM_LBUTTONDOWN:
         SetCapture(h);
-        press(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+        press(GET_X_LPARAM(l), GET_Y_LPARAM(l), HOLD_MS);
         return 0;
     case WM_MOUSEMOVE:
         if (drag != DR_NONE && (w & MK_LBUTTON)) move(GET_X_LPARAM(l), GET_Y_LPARAM(l));
@@ -1168,14 +1481,17 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         if ((HWND)l != h && drag != DR_NONE) {
             if (drag == DR_SLIDER) commit_pending();
             drag = DR_NONE;
-            KillTimer(h, TM_HOLD);
+            hold_stop(HOLD_PTR);
         }
         return 0;
-    case WM_POINTERDOWN:
+    case WM_POINTERDOWN: {
         if (!IS_POINTER_PRIMARY_WPARAM(w)) return 0;
+        POINTER_INPUT_TYPE pt = PT_TOUCH;
+        GetPointerType(GET_POINTERID_WPARAM(w), &pt);
         pt_client(l, &x, &y);
-        press(x, y);
+        press(x, y, pt == PT_MOUSE || pt == PT_TOUCHPAD ? HOLD_MS : HOLD_TOUCH_MS);
         return 0;
+    }
     case WM_POINTERUPDATE:
         if (!IS_POINTER_PRIMARY_WPARAM(w)) return 0;
         if (IS_POINTER_INCONTACT_WPARAM(w) && drag != DR_NONE) {
@@ -1193,8 +1509,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_POINTERCAPTURECHANGED:
         if (drag == DR_SLIDER) commit_pending();
         drag = DR_NONE;
-        KillTimer(h, TM_HOLD);
+        hold_stop(HOLD_PTR);
         return 0;
+    case 0x02CC:   /* WM_TABLET_QUERYSYSTEMGESTURESTATUS: no press-and-hold right click */
+        return 0x00000001 | 0x00000008 | 0x00000100;   /* DISABLE_PRESSANDHOLD | PENTAPFEEDBACK | FLICKS */
     case WM_MOUSEWHEEL:
         if (vis && !conf) {
             scroll -= GET_WHEEL_DELTA_WPARAM(w) * S(60) / WHEEL_DELTA;
@@ -1204,17 +1522,17 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
-        if (m == WM_KEYDOWN || w == VK_F10) { key(w); return 0; }
+        if (m == WM_KEYDOWN || w == VK_F10) { key(w, l); return 0; }
+        break;
+    case WM_KEYUP:
+        if (w == 'R') ui_hold(HOLD_KEY, 0);
         break;
     case WM_TIMER:
         switch (w) {
         case TM_ANIM: anim_step(); break;
         case TM_COMMIT: commit_pending(); break;
         case TM_TOAST: KillTimer(h, TM_TOAST); toast_on = 0; inval(); break;
-        case TM_HOLD:
-            KillTimer(h, TM_HOLD);
-            if (drag == DR_TAP) { held = 1; reset_sel(); }
-            break;
+        case TM_HOLD: hold_tick(); break;
         case TM_LIVE:
             if (!vis) { KillTimer(h, TM_LIVE); break; }
             update_live();
@@ -1230,6 +1548,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (w == 2) ui_toggle(); else ui_show((int)w);
         return 0;
     case WM_UI_NAV: ui_nav((int)w); return 0;
+    case WM_UI_HOLD: ui_hold((int)w, (int)l); return 0;
     case WM_UI_REFRESH: ui_refresh(); return 0;
     case WM_UI_TOAST:
         if (l) { ui_toast((const wchar_t *)l); ph_free((void *)l); }
@@ -1267,6 +1586,15 @@ void ui_init(HINSTANCE hi)
     RegisterClassW(&wc);
     DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
     hw = CreateWindowExW(ex, L"PhawxON.panel", PH_APPNAME_W, WS_POPUP, 0, 0, 1, 1, NULL, NULL, hi, NULL);
+    /* a 2 s touch hold resets a row; Windows' own hold ring and right tap would get in the way */
+    typedef BOOL (WINAPI *wfs_fn)(HWND, FEEDBACK_TYPE, DWORD, UINT32, const VOID *);
+    HMODULE u32 = GetModuleHandleW(L"user32.dll");
+    wfs_fn wfs = u32 ? (wfs_fn)(void *)GetProcAddress(u32, "SetWindowFeedbackSetting") : NULL;
+    if (hw && wfs) {
+        BOOL off = FALSE;
+        wfs(hw, FEEDBACK_TOUCH_PRESSANDHOLD, 0, sizeof off, &off);
+        wfs(hw, FEEDBACK_TOUCH_RIGHTTAP, 0, sizeof off, &off);
+    }
     toast_hw = CreateWindowExW(ex, L"PhawxON.toast", PH_APPNAME_W, WS_POPUP, 0, 0, 1, 1, NULL, NULL, hi, NULL);
     lstrcpynW(live, L"", PH_ARRAY(live));
 }

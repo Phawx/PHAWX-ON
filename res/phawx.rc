@@ -1,11 +1,12 @@
 #include <winver.h>
+#include "version.h"
 
 1 ICON "phawx.ico"
 1 24 "phawx.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION PH_VER_MAJOR,PH_VER_MINOR,PH_VER_PATCH,0
+PRODUCTVERSION PH_VER_MAJOR,PH_VER_MINOR,PH_VER_PATCH,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -15,11 +16,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Phawx"
       VALUE "FileDescription", "Phawx ON"
-      VALUE "FileVersion", "1.0.0"
+      VALUE "FileVersion", PH_VERSION
       VALUE "InternalName", "PhawxON"
       VALUE "OriginalFilename", "PhawxON.exe"
       VALUE "ProductName", "Phawx ON"
-      VALUE "ProductVersion", "1.0.0"
+      VALUE "ProductVersion", PH_VERSION
     END
   END
   BLOCK "VarFileInfo"

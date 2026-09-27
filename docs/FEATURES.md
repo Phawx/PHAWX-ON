@@ -1,6 +1,6 @@
 # Phawx ON feature matrix
 
-This table lists what Phawx ON 1.0 supports.
+This table lists what Phawx ON 1.1 supports.
 
 **Status**
 - **Yes**: implemented.
@@ -15,7 +15,7 @@ Control keys (such as `cpu.tdp`) are the names used in `phawx.ini`.
 
 | Feature | Status | Where | Notes |
 |---|---|---|---|
-| QAM-style slide-out overlay | Yes | `src/ui.c` | Topmost panel that never takes focus. Slides in from the right edge of the foreground monitor. DPI-aware. Tabs: Quick / CPU / Power / GPU / Display / System / Settings. |
+| QAM-style slide-out overlay | Yes | `src/ui.c` | Topmost panel that never takes focus. Slides in from the right edge of the foreground monitor. DPI-aware. Tabs: Quick / CPU / Power / GPU / Display / System / Plugins / Settings. |
 | "Phawx ON" / "Phawx OFF" header | Yes | `src/ui.c` (header draw), `src/autotdp.c` (`auto.on`) | Green "Phawx ON" while AutoTDP runs, "Phawx OFF" otherwise. Below it, a live strip shows FPS, target and clocks. |
 | Overlay only on request | Yes | `src/ui.c`, `src/main.c` | Opens only from the tray, the button combo, the edge swipe or Ctrl+Alt+P. Starts hidden with `/tray`. |
 | Intel TDP (PL1/PL2) | Yes | `src/cpu/intel.c` (`cpu.tdp`, `cpu.tdpboost`) | MSR 0x610 with the real 0x606 units. Writes the whole field: enable, clamp and time window are kept. PL2 is raised to PL1 if it would end up lower. Controls hide if the BIOS locked the MSR. |
@@ -34,15 +34,21 @@ Control keys (such as `cpu.tdp`) are the names used in `phawx.ini`.
 | GPU clocks, Intel iGPU / Arc | Yes | `src/gpu/intel.c` (`intelgpu.*`, `arc.*`) | Intel IGCL (ControlLib) frequency range and power limits. |
 | AutoTDP: FPS target at the lowest clocks | Yes | `src/autotdp.c` | Sets EPP to 0 while running (restored on stop). Raises clocks fast when FPS drops and lowers them slowly once FPS is stable. Picks CPU or GPU as the bottleneck. Target can be the refresh rate, half the refresh rate, or a custom value. You can set floor and ceiling limits. |
 | FPS source | Yes | `src/fps.c` | Intel PresentMon service (PresentMonAPI2). The DLL is only loaded from Program Files. There is no in-process ETW fallback. |
-| Per-game profiles | Partial | `src/main.c`, `src/config.c` | Switches automatically on the foreground exe, using `[game:<exe>]` sections. Controls flagged `CF_PROFILE` are saved. The AutoTDP on/off state itself is global, not per game. |
-| Gamepad navigation | Partial | `src/input.c` | XInput pads, including the Guide button through XInputGetStateEx. Non-XInput HID pads (for example DualSense, or some vendor handheld buttons) are not read. |
+| Per-game profiles | Partial | `src/main.c` (`app.profiles`), `src/config.c` | Off by default. "Save profile for current game" (Settings) turns them on. Switches automatically on the foreground exe, using `[game:<exe>]` sections. Controls flagged `CF_PROFILE` are saved. The AutoTDP on/off state itself is global, not per game. Configs from 1.0 that already have profiles keep them on. |
+| Gamepad navigation | Partial | `src/input.c` | XInput pads, including the Guide button through XInputGetStateEx. Y pins or unpins the selected setting; holding X resets it. Non-XInput HID pads (for example DualSense, or some vendor handheld buttons) are not read. |
 | Button combo to open | Yes | `src/input.c`, `src/main.c` (`app.combo`) | Default is Guide, or Back+Start. Settings → "Open menu combo" records any combo of two or more held buttons. |
-| Touch | Yes | `src/input.c`, `src/ui.c` | Swipe left from the top-right screen edge to open. Tap, drag, scroll and long-press to reset inside the panel. |
+| Touch | Yes | `src/input.c`, `src/ui.c` | Swipe left from the top-right screen edge to open. Tap, drag and scroll inside the panel. Tap a row's pin to pin it. Press and hold a row for 2 seconds to reset it (0.5 s with a mouse). Windows' own press-and-hold ring is turned off for the panel. |
 | Tray icon | Yes | `src/main.c` | Click toggles the menu. The right-click menu has Open, AutoTDP, Start with Windows and Exit. |
-| Keyboard | Partial | `src/main.c`, `src/ui.c` | The Ctrl+Alt+P hotkey works. In-panel key handling exists, but the panel is no-activate and never gets keyboard focus. |
+| Keyboard | Partial | `src/main.c`, `src/ui.c`, `src/input.c` | The Ctrl+Alt+P hotkey works. Holding R resets the selected setting; it is read with raw input only while the menu is open, so the key also reaches the game. Other in-panel keys need focus, which the no-activate panel never gets. |
 | Start with Windows | Yes | `src/main.c` (`app.autostart`) | ONLOGON scheduled task with highest privileges. Refused unless the exe is under Program Files. |
-| Restore on exit, crash and resume | Yes | `src/main.c`, each backend's `shutdown`/`resume` | Windows power values, CPPC, SMU limits, the Intel PL and NVML clocks are restored on exit and from the crash handler. Settings are reapplied after resume and on AC/DC change. |
-| Extensible plugin design | Yes | `src/phawx.h`, `src/registry.c` | `ph_backend` with probe/init/shutdown/resume/tick, generic `ph_ctl` controls rendered by the UI, and `ph_clk` clock domains that AutoTDP drives. See the README. |
+| Restore on exit, crash and resume | Yes | `src/main.c`, each backend's `shutdown`/`resume` | Windows power values, CPPC, SMU limits, the Intel PL and NVML clocks are restored on exit and from the crash handler. Settings are reapplied after resume and on AC/DC change. 1.1 fixes the crash handler, which never ran in 1.0 because the exe was built without unwind tables. |
+| Extensible backend design | Yes | `src/phawx.h`, `src/registry.c` | `ph_backend` with probe/init/shutdown/resume/tick, generic `ph_ctl` controls rendered by the UI, and `ph_clk` clock domains that AutoTDP drives. See the README. |
+| Pins on the Quick page | Yes | `src/pins.c`, `src/ui.c` | Every setting row has a pin. Tap it or press Y to add or remove the setting. Pinned settings show in a Pinned section below the built-in Quick controls, each with the page it came from. Saved in `[pins]`. |
+| Hold to reset | Yes | `src/ui.c` (`hold_*`), `src/input.c` | Hold X (gamepad) or R (keyboard) for 0.5 s, or touch and hold for 2 s, to set the selected row back to its default. A bar fills along the row while you hold. |
+| Plugins page | Yes | `src/plugins.c` | Status of the two required components (PawnIO and PresentMon, with version) and a Download link for each one that is missing. Below that, every plugin found, with an on/off switch and its status. |
+| DLL plugins | Yes | `src/plugins.c`, `plugins/sdk/phawx_plugin.h`, `docs/PLUGINS.md` | C-ABI DLLs in `plugins\` next to the exe that export `phx_plugin_init`. They can add controls, AutoTDP clock domains, fans and RGB lights, and they get config, logging and PawnIO EC/MSR access. Off by default, loaded only from Program Files, applied on restart. A plugin that crashes or hangs is turned off on the next start. |
+| Fans and RGB lights from plugins | Yes | `src/plugins.c` (`h_add_fan`, `h_add_rgb`) | The host builds the System page rows (mode, speed, RPM; mode, colour, brightness, effect) and hands the hardware back to firmware on exit and crash. |
+| RyzenAdj plugin | Yes | `plugins/ryzenadj/` | Uses `libryzenadj.dll` from `plugins\ryzenadj\` when it is present. Adds STAPM, fast and slow limits, the temperature limit and (Raven to Lucienne) an iGPU clock domain for AutoTDP. Stands down when the built-in AMD backend already controls the APU. Restores the original limits on exit. |
 
 ## Additional capabilities
 

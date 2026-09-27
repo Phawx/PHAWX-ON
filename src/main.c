@@ -8,7 +8,7 @@ static NOTIFYICONDATAW nid;
 static UINT wm_taskbar;
 static HWINEVENTHOOK fg_hook;
 static wchar_t cur_profile[64];
-static int profiles_on = 1;
+static int profiles_on;
 static int advanced;
 static int autostart_state = -1;
 static HICON tray_icon;
@@ -82,17 +82,6 @@ int app_autostart_get(void)
     return autostart_state;
 }
 
-static int exe_in_protected_dir(const wchar_t *exe)
-{
-    wchar_t pf[MAX_PATH];
-    const wchar_t *vars[] = { L"ProgramFiles", L"ProgramW6432" };
-    for (int i = 0; i < 2; i++) {
-        DWORD n = GetEnvironmentVariableW(vars[i], pf, MAX_PATH);
-        if (n && n < MAX_PATH - 1 && !_wcsnicmp(exe, pf, n) && exe[n] == L'\\') return 1;
-    }
-    return 0;
-}
-
 int app_autostart_set(int on)
 {
     wchar_t exe[MAX_PATH], cmd[1024];
@@ -100,7 +89,7 @@ int app_autostart_set(int on)
     if (on == app_autostart_get()) return 0;
     DWORD len = GetModuleFileNameW(NULL, exe, MAX_PATH);
     if (!len || len >= MAX_PATH) return -1;
-    if (on && !exe_in_protected_dir(exe)) {
+    if (on && !ph_path_protected(exe)) {
         ui_toast(L"Move Phawx ON to Program Files to enable autostart");
         return -1;
     }
@@ -209,8 +198,13 @@ static int act_save_profile(ph_ctl *c, int32_t v)
     if (cur_profile[0] && lstrcmpiW(exe, cur_profile)) app_save();
     cfg_save_profile(exe);
     lstrcpynW(cur_profile, exe, PH_ARRAY(cur_profile));
+    /* saving a profile only makes sense with switching on, so turn it on rather than
+       leave the user stuck in a profile that never switches back */
+    int turned_on = 0;
+    ph_ctl *p = ph_ctl_find("app.profiles");
+    if (!profiles_on && p && ph_ctl_apply(p, 1) == 0) { turned_on = 1; cfg_mark_dirty(); }
     wchar_t m[128];
-    ph_swprintf(m, 128, L"Saved profile for %s", exe);
+    ph_swprintf(m, 128, turned_on ? L"Saved profile for %s, per-game profiles on" : L"Saved profile for %s", exe);
     ui_toast(m);
     return 0;
 }
@@ -288,7 +282,7 @@ static ph_ctl app_ctls[] = {
     { .key = "app.autostart", .label = L"Start with Windows", .type = CT_TOGGLE, .page = PG_SETTINGS, .set = set_autostart, .get = get_autostart, .flags = CF_NOSAVE, .order = 2 },
     { .key = "app.advanced", .label = L"Show advanced options", .type = CT_TOGGLE, .page = PG_SETTINGS, .set = set_adv, .order = 3 },
     { .key = NULL, .label = L"Profiles", .type = CT_HEADER, .page = PG_SETTINGS, .order = 10 },
-    { .key = "app.profiles", .label = L"Per-game profiles", .type = CT_TOGGLE, .page = PG_SETTINGS, .def = 1, .set = set_profiles, .order = 11 },
+    { .key = "app.profiles", .label = L"Per-game profiles", .type = CT_TOGGLE, .page = PG_SETTINGS, .def = 0, .set = set_profiles, .order = 11 },
     { .key = "app.saveprof", .label = L"Save profile for current game", .type = CT_ACTION, .page = PG_SETTINGS, .set = act_save_profile, .flags = CF_NOSAVE, .order = 12 },
     { .key = "app.delprof", .label = L"Delete current game profile", .type = CT_ACTION, .page = PG_SETTINGS, .set = act_del_profile, .flags = CF_NOSAVE, .order = 13 },
     { .key = "app.resetall", .label = L"Revert everything to defaults", .type = CT_ACTION, .page = PG_SETTINGS, .set = act_reset_all, .flags = CF_NOSAVE | CF_DANGER, .order = 14 },
@@ -304,6 +298,27 @@ int ph_advanced(void) { return advanced; }
 void app_quit(void)
 {
     if (g_main) DestroyWindow(g_main);
+}
+
+/* The new instance waits on the single-instance mutex until this one has exited
+   and restored the hardware. The quit is posted so it happens after the control
+   that asked for it has finished. */
+int app_restart(void)
+{
+    wchar_t exe[MAX_PATH], cmd[MAX_PATH + 16];
+    DWORD len = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    if (!len || len >= MAX_PATH || !g_main) return -1;
+    ph_swprintf(cmd, PH_ARRAY(cmd), L"\"%s\" /restart", exe);
+    STARTUPINFOW si = { sizeof si };
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        ui_toast(L"Could not restart Phawx ON");
+        return -1;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    PostMessageW(g_main, WM_CLOSE, 0, 0);
+    return 0;
 }
 
 /* Restore everything that must not outlive the process. Runs once, from WM_DESTROY,
@@ -333,20 +348,25 @@ static void app_cleanup(void)
     if (m) Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
+static void *crash_addr;
+static DWORD crash_tid;
+
 static DWORD WINAPI crash_restore(LPVOID p)
 {
     (void)p;
-    autotdp_stop();
-    ph_backends_shutdown();
+    plugins_crash_note(crash_addr);
+    autotdp_crash_release(crash_tid);
+    ph_backends_shutdown_crash();
     drv_close();
     return 0;
 }
 
 static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep)
 {
-    (void)ep;
     if (!InterlockedExchange(&hw_restored, 1)) {
         g_main = NULL;
+        crash_addr = ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionAddress : NULL;
+        crash_tid = GetCurrentThreadId();
         HANDLE t = CreateThread(NULL, 0, crash_restore, NULL, 0, NULL);
         if (t) { WaitForSingleObject(t, 4000); CloseHandle(t); }
     }
@@ -365,6 +385,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0;
     case WM_PH_TOGGLE: ui_toggle(); return 0;
     case WM_PH_NAV: ui_nav((int)w); return 0;
+    case WM_PH_HOLD: ui_hold((int)w, (int)l); return 0;
     case WM_PH_REFRESH: ui_refresh(); app_tray_update(); return 0;
     case WM_HOTKEY: if (w == HK_MENU) ui_toggle(); return 0;
     case WM_INPUT: input_on_rawinput(h, l); return DefWindowProcW(h, m, w, l);
@@ -412,13 +433,22 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
 {
     (void)prev; (void)show;
     g_inst = hi;
+    int restart = cmd && wcsstr(cmd, L"/restart") != NULL;
     HANDLE mtx = CreateMutexW(NULL, TRUE, L"Local\\PhawxON.single");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        HWND o = FindWindowW(L"PhawxON.main", NULL);
-        if (o) PostMessageW(o, WM_PH_TOGGLE, 0, 0);
-        if (mtx) CloseHandle(mtx);
-        return 0;
+        /* after "Restart Phawx ON": wait for the old instance to finish restoring */
+        DWORD wr = restart && mtx ? WaitForSingleObject(mtx, 15000) : WAIT_TIMEOUT;
+        if (wr != WAIT_OBJECT_0 && wr != WAIT_ABANDONED) {
+            if (!restart) {
+                HWND o = FindWindowW(L"PhawxON.main", NULL);
+                if (o) PostMessageW(o, WM_PH_TOGGLE, 0, 0);
+            }
+            if (mtx) CloseHandle(mtx);
+            return 0;
+        }
     }
+    /* elevated: never look in the current directory for DLLs */
+    SetDllDirectoryW(L"");
     SetUnhandledExceptionFilter(crash_filter);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
@@ -445,6 +475,14 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
     autotdp_register_ctls();
     ph_register_ctls(app_ctls, PH_ARRAY(app_ctls));
     cfg_load();
+    pins_load();
+    /* 1.1 turned per-game profiles off by default; keep them switching for anyone
+       who already saved one under 1.0 (asked once, so a later Default sticks) */
+    ph_ctl *prof = ph_ctl_find("app.profiles");
+    if (!cfg_get_int("global", "app.migrated", 0)) {
+        if (prof && !prof->active && cfg_any_profile()) { prof->active = 1; prof->val = 1; prof->dirty = 1; }
+        cfg_set_int("global", "app.migrated", 1);
+    }
     ph_apply_all(0);
 
     ui_init(hi);
@@ -455,7 +493,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
                               WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
     if (cfg_get_int("global", "autotdp.on", 0)) autotdp_start();
-    if (cmd && !wcsstr(cmd, L"/tray") && !cfg_get_int("global", "app.silent", 0)) ui_show(1);
+    if (restart) ui_show_page(PG_PLUGINS);
+    else if (cmd && !wcsstr(cmd, L"/tray") && !cfg_get_int("global", "app.silent", 0)) ui_show(1);
     app_tray_update();
     SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
 

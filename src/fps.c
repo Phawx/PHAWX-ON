@@ -55,6 +55,7 @@ static volatile LONG status;
 static ph_fps    snap;
 static int       snap_ok;
 static uint64_t  last_probe;
+static wchar_t   pm_ver[24];
 
 static pm_session sess;
 static pm_fquery  fq;
@@ -207,8 +208,20 @@ static int pm_load(int start_svc)
     pm_version v;
     memset(&v, 0, sizeof v);
     if (pm.version && !pm.version(&v)) ph_log("fps: PresentMon API %u.%u.%u", v.major, v.minor, v.patch);
+    /* show the product version users know (2.x); the API number (3.x) is only a fallback */
+    wchar_t path[MAX_PATH];
+    int fv[3];
+    DWORD pn = GetModuleFileNameW(h, path, MAX_PATH);
+    if (pn && pn < MAX_PATH && ph_file_version(path, fv, NULL, 0) == 0) {
+        ph_fmt_version(pm_ver, PH_ARRAY(pm_ver), fv);
+    } else if (v.major) {
+        int av[3] = { v.major, v.minor, v.patch };
+        ph_fmt_version(pm_ver, PH_ARRAY(pm_ver), av);
+    }
     return 0;
 }
+
+const wchar_t *fps_version(void) { return pm_ver; }
 
 static int key_value(const pm_root *r, const char *sym, int *out)
 {

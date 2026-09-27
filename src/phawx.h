@@ -11,8 +11,7 @@
 #include <windows.h>
 #include <stdint.h>
 
-#define PH_VERSION   "1.0.0"
-#define PH_VERSION_W L"1.0.0"
+#include "version.h"
 #define PH_APPNAME_W L"Phawx ON"
 
 /* ---------- pages shown in the overlay ---------- */
@@ -23,12 +22,15 @@ enum {
     PG_GPU,
     PG_DISPLAY,
     PG_SYSTEM,
+    PG_PLUGINS,
     PG_SETTINGS,
     PG_COUNT
 };
 
 /* ---------- controls: every tunable is one of these ---------- */
-enum { CT_SLIDER, CT_TOGGLE, CT_CHOICE, CT_ACTION, CT_INFO, CT_HEADER };
+/* CT_STATUS: full-width line; get() returns its tone (TONE_*), fmt() its text */
+enum { CT_SLIDER, CT_TOGGLE, CT_CHOICE, CT_ACTION, CT_INFO, CT_HEADER, CT_STATUS };
+enum { TONE_DIM, TONE_GOOD, TONE_BAD };
 
 enum {
     CF_NOSAVE    = 1 << 0,  /* never persisted */
@@ -41,13 +43,16 @@ enum {
     CF_AUTOTDP   = 1 << 7,  /* locked while AutoTDP owns it */
     CF_PROFILE   = 1 << 8,  /* saved per game profile */
     CF_SIGNED    = 1 << 9,  /* display with explicit sign */
-    CF_FLICKER   = 1 << 10  /* screen may flicker when changed */
+    CF_FLICKER   = 1 << 10, /* screen may flicker when changed */
+    CF_NOPIN     = 1 << 11, /* cannot be pinned to the Quick page */
+    CF_CONFIRM   = 1 << 12  /* asks first (message in desc) without being shown as dangerous */
 };
 
 typedef struct ph_ctl ph_ctl;
 typedef int  (*ph_get_fn)(ph_ctl *c, int32_t *out);
 typedef int  (*ph_set_fn)(ph_ctl *c, int32_t v);
 typedef void (*ph_fmt_fn)(const ph_ctl *c, int32_t v, wchar_t *buf, int n);
+typedef int  (*ph_sub_fn)(const ph_ctl *c, wchar_t *buf, int n);   /* second line; returns TONE_* */
 
 struct ph_ctl {
     const char        *key;       /* config key "cpu.pl1"; NULL for headers/info */
@@ -69,6 +74,7 @@ struct ph_ctl {
     uint8_t            active;    /* user chose a value (not "Default") */
     uint8_t            dirty;
     int16_t            order;     /* sort key within page, lower first */
+    ph_sub_fn          sub;       /* optional status line under the label */
 };
 
 /* ---------- clock domains used by AutoTDP ---------- */
@@ -85,7 +91,7 @@ typedef struct ph_clk {
 } ph_clk;
 
 /* ---------- backends (plugins) ---------- */
-enum { BK_DRIVER, BK_CPU, BK_POWER, BK_GPU, BK_SYS, BK_DEVICE };
+enum { BK_DRIVER, BK_CPU, BK_POWER, BK_GPU, BK_SYS, BK_DEVICE, BK_PLUGIN };
 
 typedef struct ph_backend {
     const char    *id;
@@ -117,6 +123,7 @@ int      ph_gpu_clk_count(void);
 void     ph_select_gpu_clk(int i);
 void     ph_backends_init(void);
 void     ph_backends_shutdown(void);
+void     ph_backends_shutdown_crash(void);
 void     ph_backends_resume(void);
 void     ph_backends_tick(void);
 extern ph_backend *const ph_backends[];
@@ -138,9 +145,13 @@ typedef struct ph_drv {
 
 #define PH_BDF(b, d, f) (((uint32_t)(b) << 8) | ((uint32_t)(d) << 3) | (uint32_t)(f))
 
+enum { DRV_MISSING, DRV_STOPPED, DRV_NOMODULES, DRV_OK };
 int  drv_open(void);
 int  drv_ok(void);
+int  drv_state(void);                 /* DRV_OK, or why drv_ok() is false */
 const char *drv_name(void);
+const char *drv_version(void);        /* "2.0", "" if unknown */
+const char *drv_missing(void);        /* CPU modules that failed to load, "" if none */
 int  drv_rdmsr(uint32_t msr, uint64_t *v);
 int  drv_wrmsr(uint32_t msr, uint64_t v);
 int  drv_rdmsr_cpu(uint32_t msr, int cpu, uint64_t *v);
@@ -214,6 +225,7 @@ typedef struct ph_fps {
 } ph_fps;
 int  fps_start(void);                  /* 0 ok, -1 PresentMon unavailable */
 int  fps_status(void);                 /* 0 missing, 1 service unreachable, 2 ok */
+const wchar_t *fps_version(void);      /* version of the loaded PresentMon, L"" if unknown */
 void fps_stop(void);
 int  fps_sample(ph_fps *out);          /* foreground presenting process */
 HANDLE fps_event(void);                /* signalled on new frames (throttled) */
@@ -243,6 +255,7 @@ typedef struct ph_auto_state {
 extern ph_auto_cfg g_auto;
 int  autotdp_start(void);
 void autotdp_stop(void);
+void autotdp_crash_release(DWORD crashed_tid);   /* crash path: uncap clocks without joining the worker */
 int  autotdp_running(void);
 void autotdp_state(ph_auto_state *s);
 void autotdp_register_ctls(void);
@@ -253,18 +266,26 @@ void cfg_save(void);
 int  cfg_get_int(const char *sec, const char *key, int def);
 void cfg_set_int(const char *sec, const char *key, int v);
 int  cfg_get_str(const char *sec, const char *key, char *out, int n);
-void cfg_set_str(const char *sec, const char *key, const char *v);
+void cfg_set_str(const char *sec, const char *key, const char *v);   /* NULL deletes the key */
+void cfg_clear(const char *sec);                                    /* delete a whole section */
+const wchar_t *cfg_file(void);
 void cfg_load_profile(const wchar_t *exe);  /* NULL = global */
 void cfg_save_profile(const wchar_t *exe);
 int  cfg_has_profile(const wchar_t *exe);
+int  cfg_any_profile(void);                 /* any [game:*] section saved */
 const wchar_t *cfg_dir(void);
 void cfg_mark_dirty(void);
 
 /* ---------- input (input.c) ---------- */
+/* IN_RESET resets at once (Delete key); the pad's X and keyboard R reset only when
+   held, reported through ui_hold. IN_PIN is the pad's Y. */
 enum {
     IN_UP, IN_DOWN, IN_LEFT, IN_RIGHT, IN_OK, IN_BACK, IN_TAB_PREV, IN_TAB_NEXT,
-    IN_TOGGLE_MENU, IN_AUX, IN_RESET
+    IN_TOGGLE_MENU, IN_AUX, IN_RESET, IN_PIN, IN_NAV_COUNT
 };
+enum { HOLD_PAD = 1, HOLD_KEY = 2, HOLD_PTR = 4 };  /* sources of a hold-to-reset */
+#define HOLD_MS       500
+#define HOLD_TOUCH_MS 2000
 void input_init(HWND owner);
 void input_menu_open(int open);         /* raise poll rate while visible */
 void input_shutdown(void);
@@ -281,11 +302,26 @@ void combo_to_text(uint32_t mask, wchar_t *buf, int n);
 void ui_init(HINSTANCE hi);
 void ui_toggle(void);
 void ui_show(int show);
+void ui_show_page(int pg);
 int  ui_visible(void);
 void ui_nav(int action);
+void ui_hold(int src, int down);        /* HOLD_* source pressed / released */
 void ui_refresh(void);
 HWND ui_hwnd(void);
 void ui_toast(const wchar_t *msg);
+
+/* ---------- pins on the Quick page (pins.c) ---------- */
+void pins_load(void);
+int  pin_count(void);
+const char *pin_at(int i);
+int  pin_has(const char *key);
+int  pin_toggle(const char *key);       /* returns 1 if now pinned, 0 if removed, -1 if full */
+int  ph_ctl_pinnable(const ph_ctl *c);
+
+/* ---------- plugins (plugins.c) ---------- */
+extern ph_backend bk_plugins;
+int  plugins_restart_pending(void);
+void plugins_crash_note(void *fault_addr);   /* crash filter: remember which plugin faulted */
 
 /* ---------- tray / app (main.c) ---------- */
 #define WM_PH_TRAY     (WM_APP + 1)
@@ -293,10 +329,12 @@ void ui_toast(const wchar_t *msg);
 #define WM_PH_NAV      (WM_APP + 3)
 #define WM_PH_REFRESH  (WM_APP + 4)
 #define WM_PH_FGCHANGE (WM_APP + 5)
+#define WM_PH_HOLD     (WM_APP + 6)     /* wParam HOLD_* source, lParam 1 down / 0 up */
 extern HWND g_main;
 extern HINSTANCE g_inst;
 void app_tray_update(void);
 void app_quit(void);
+int  app_restart(void);                 /* relaunch; the new instance waits for this one to exit */
 int  app_autostart_get(void);
 int  app_autostart_set(int on);
 int  ph_advanced(void);
@@ -315,8 +353,17 @@ int   reg_get_str(HKEY root, const wchar_t *path, const wchar_t *name, wchar_t *
 int   reg_set_str(HKEY root, const wchar_t *path, const wchar_t *name, const wchar_t *v);
 int   reg_set_bin(HKEY root, const wchar_t *path, const wchar_t *name, const void *d, DWORD n);
 int   gpu_class_keys(const wchar_t *ven, wchar_t keys[][128], int max);  /* display class driver keys for PCI\VEN_xxxx */
+int   ph_exe_dir(wchar_t *out, int n);                  /* folder of PhawxON.exe, no trailing slash */
+int   ph_path_protected(const wchar_t *path);           /* inside Program Files (admin-only writes) */
+int   ph_file_version(const wchar_t *path, int ver[3], wchar_t *desc, int ndesc); /* product version + FileDescription */
+void  ph_fmt_version(wchar_t *out, int n, const int ver[3]);                  /* "2.0" or "2.0.1" */
+int   ph_open_url(const wchar_t *target);               /* open in the user's (unelevated) shell */
 void *ph_alloc(size_t n);
 void  ph_free(void *p);
+
+/* ---------- embedded controller (sys/devices.c) ---------- */
+int   ph_ec_read(uint8_t reg, uint8_t *v);              /* ACPI EC 0x62/0x66 through PawnIO */
+int   ph_ec_write(uint8_t reg, uint8_t v);
 #define PH_ARRAY(a) ((int)(sizeof(a) / sizeof((a)[0])))
 #define PH_CLAMP(v, lo, hi) ((v) < (lo) ? (lo) : (v) > (hi) ? (hi) : (v))
 

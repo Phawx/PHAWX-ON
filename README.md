@@ -1,6 +1,6 @@
 # Phawx ON
 
-Phawx ON is a small, open-source performance tuning app for Windows handhelds and laptops. It is a native C tray app of about 250 KB with no runtime dependencies. It adds a Steam Deck–style quick-access overlay where you set TDP, EPP, CPU and GPU clocks, and hybrid P/E core behaviour. It also has an **AutoTDP** mode that holds a target frame rate at the lowest CPU and GPU clocks that still reach it.
+Phawx ON is a small, open-source performance tuning app for Windows handhelds and laptops. It is a native C tray app of about 320 KB with no runtime dependencies. It adds a Steam Deck–style quick-access overlay where you set TDP, EPP, CPU and GPU clocks, and hybrid P/E core behaviour. It also has an **AutoTDP** mode that holds a target frame rate at the lowest CPU and GPU clocks that still reach it.
 
 It is built to be a good citizen:
 
@@ -17,7 +17,10 @@ See [docs/FEATURES.md](docs/FEATURES.md) for the full feature matrix, including 
 
 ## Features
 
-- **Overlay.** Slides in from the right edge, and gamepad, touch and mouse all work in it. The header reads **Phawx ON** (green) while AutoTDP runs and **Phawx OFF** otherwise, with live FPS and clocks below it. Pages: Quick, CPU, Power, GPU, Display, System, Settings.
+- **Overlay.** Slides in from the right edge, and gamepad, touch and mouse all work in it. The header reads **Phawx ON** (green) while AutoTDP runs and **Phawx OFF** otherwise, with live FPS and clocks below it. Pages: Quick, CPU, Power, GPU, Display, System, Plugins, Settings.
+- **Pins.** Every setting has a pin. Pinned settings appear on the Quick page, below its own rows.
+- **Hold to reset.** Hold X or R on a setting for half a second (or touch and hold it for 2 seconds) to put it back to Default.
+- **Plugins.** DLLs in a `plugins` folder add controls, clock domains, fans and RGB lights. The Plugins page also shows whether PawnIO and PresentMon are installed and running. A RyzenAdj plugin is included. See [docs/PLUGINS.md](docs/PLUGINS.md).
 - **TDP.**
   - Intel: PL1/PL2 and their time windows, through MSR 0x610 with the real power units.
   - AMD Ryzen APUs (Raven through Strix Halo): sustained, boost, slow and APU slow limits, time constants and temperature limit, through the SMU.
@@ -39,7 +42,7 @@ See [docs/FEATURES.md](docs/FEATURES.md) for the full feature matrix, including 
   - Detects whether the CPU or the GPU is the bottleneck.
   - Can park P/E cores dynamically.
   - Target can be the refresh rate, half the refresh rate, or a custom value.
-- **Per-game profiles.** Save the current settings for the game in front. They load automatically whenever that game is in the foreground.
+- **Per-game profiles** (off by default). Save the current settings for the game in front. They load automatically whenever that game is in the foreground.
 - **Display.** Refresh rate and resolution.
 - **System.** Game Mode, Game Bar capture, GPU hardware scheduling, touch keyboard, Modern Standby override, and GPD Win Mini fan control.
 
@@ -53,14 +56,14 @@ See [docs/FEATURES.md](docs/FEATURES.md) for the full feature matrix, including 
      - AMD: `AMDFamily17.bin`, `RyzenSMU.bin`
      - Fan: `LpcACPIEC.bin`
 
-  The driver only runs code signed by the PawnIO project. Phawx ON can therefore only do what those modules allow. On Intel this means the power limit (0x610) is available, but turbo ratios and HWP MSRs are not. Without PawnIO, the Windows power, GPU vendor API and display controls still work.
+  The driver only runs code signed by the PawnIO project. Phawx ON can therefore only do what those modules allow. On Intel this means the power limit (0x610) is available, but turbo ratios and HWP MSRs are not. Without PawnIO, the Windows power, GPU vendor API and display controls still work. The **Plugins** page shows whether PawnIO is running and which modules are missing, and links to the download.
 - **Intel PresentMon** (only needed for AutoTDP and the FPS readout): install PresentMon 2.x from <https://game.intel.com/story/intel-presentmon/> or [GitHub](https://github.com/GameTechDev/PresentMon/releases). Phawx ON uses the PresentMon service and its `PresentMonAPI2.dll`. It only loads that DLL from under Program Files, and starts the service if it is stopped.
 - GPU clock control uses each vendor's own driver component: `amdadlx64.dll` / `atiadlxx.dll` (AMD Adrenalin), `nvml.dll` (NVIDIA driver) or `ControlLib.dll` (Intel graphics driver). Controls for a GPU without its driver component are hidden.
 
 ## Install
 
-1. Download `PhawxON-1.0.0.zip` from [Releases](https://github.com/Phawx/PhawxON/releases).
-2. Extract it to **`C:\Program Files\PhawxON\`**. "Start with Windows" only works from there, because an elevated autostart task must never point at a folder that normal users can write to.
+1. Download `PhawxON-1.1.0.zip` from [Releases](https://github.com/Phawx/PHAWX-ON/releases).
+2. Extract it to **`C:\Program Files\PhawxON\`**. "Start with Windows" and plugins only work from there, because an app that runs elevated must never load anything from a folder that normal users can write to.
 3. Install PawnIO with its modules, and PresentMon if you want AutoTDP (see above).
 4. Run `PhawxON.exe`.
 5. Optional: turn on **Settings → Start with Windows**. This creates a logon task that starts Phawx ON hidden in the tray (`/tray`).
@@ -93,11 +96,17 @@ The overlay never takes focus from the game.
 | D-pad left/right | Drag the slider | Change the value |
 | A | Tap | Toggle or run the selected item |
 | LB / RB | Tap a tab | Switch page |
-| X | Long-press | Reset the row to **Default** (Phawx ON stops managing it) |
-| Y | - | Turn AutoTDP on or off |
+| Hold X (the left face button) or R on the keyboard, about half a second | Touch and hold for 2 seconds (mouse: half a second) | Reset the row to **Default** (Phawx ON stops managing it). A bar under the row shows the progress. |
+| Y (the top face button) | Tap the pin at the left of the row | Pin the setting to the Quick page, or unpin it |
 | B | - | Close the menu |
 
 Changes take effect about half a second after you stop adjusting. Settings marked dangerous ask for confirmation first. Advanced options are hidden until you turn on **Settings → Show advanced options**.
+
+The overlay never takes keyboard focus from the game, so while it is open Phawx ON watches the R key without taking it: the game sees R too. AutoTDP is turned on and off with the **Phawx ON** switch at the top of the Quick page, or from the tray icon.
+
+### Pins
+
+Pinned settings are listed on the Quick page under **Pinned**, in the order you pinned them, with the page and section they come from. They are saved in `phawx.ini` (`[pins]`). A pin on a setting that is currently unavailable, such as one from a plugin that is off, is kept and comes back with the setting.
 
 ### AutoTDP
 
@@ -111,27 +120,41 @@ AutoTDP works on clocks, not power limits. Set a TDP ceiling on the Quick page i
 
 ### Per-game profiles
 
+Per-game profiles are off until you turn on **Settings → Per-game profiles**, or save your first profile:
+
 1. With the game in front, open the overlay.
 2. Set it up as you like.
-3. Go to **Settings → Save profile for current game**.
+3. Go to **Settings → Save profile for current game**. This also turns per-game profiles on.
 
-Phawx ON switches profiles when the game gains focus and switches back to your global settings when it loses focus.
+Phawx ON switches profiles when the game gains focus and switches back to your global settings when it loses focus. If you saved profiles with Phawx ON 1.0, profiles stay on after the update.
+
+### Plugins
+
+The **Plugins** page starts with the status of the two components Phawx ON relies on:
+- PawnIO, for hardware access;
+- PresentMon, for FPS.
+
+Each shows *… is loaded and running* in green, or a red ✗ with what is wrong and a **Download** link to the official site.
+
+Below that is every plugin found in the `plugins` folder next to `PhawxON.exe`, with an on/off switch and whether it is running. Plugins are off until you turn them on, and changes apply after **Restart Phawx ON to apply**. A plugin that crashes Phawx ON is turned off automatically at the next start. To write one, see [docs/PLUGINS.md](docs/PLUGINS.md).
+
+The zip includes the **RyzenAdj** plugin (`plugins\ryzenadj\`). It sets AMD APU power limits through RyzenAdj's `libryzenadj.dll` on machines where PawnIO's SMU access does not work. It needs RyzenAdj's Windows release files copied next to it, and its drivers may be blocked by Windows. See [docs/PLUGINS.md](docs/PLUGINS.md#the-ryzenadj-plugin).
 
 ## Build
 
 You need `x86_64-w64-mingw32-gcc` and `windres` from mingw-w64 (Debian/Ubuntu: `apt install mingw-w64`, or MSYS2 on Windows) and GNU make.
 
 ```sh
-make -j8        # build/PhawxON.exe
-make dist       # dist/PhawxON-1.0.0.zip
+make -j8        # build/PhawxON.exe and the plugins in build/plugins/
+make dist       # dist/PhawxON-<version>.zip, with plugins\ryzenadj and sdk\
 make clean
 ```
 
-The build uses `-Wall -Wextra` and should produce no warnings. `.github/workflows/release.yml` builds the zip and publishes the GitHub release when you trigger it manually.
+The build uses `-Wall -Wextra` and should produce no warnings. The version is set in one place, `src/version.h`. `.github/workflows/release.yml` builds the zip and publishes the GitHub release for that version when you trigger it manually.
 
 ## Adding a hardware backend
 
-A backend is one C file that controls some hardware. The UI draws its controls automatically, profiles save them, and AutoTDP can drive its clocks. Adding one takes three steps:
+Hardware support can be added as a [plugin](docs/PLUGINS.md), a separate DLL built and shipped on its own, or as a built-in backend. A backend is one C file that controls some hardware. The UI draws its controls automatically, profiles save them, and AutoTDP can drive its clocks. Adding one takes three steps:
 
 1. Create `src/<area>/<name>.c`. The Makefile picks it up automatically.
 2. Add `extern ph_backend bk_<name>;` and `&bk_<name>,` to the table in `src/registry.c`.

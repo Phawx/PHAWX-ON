@@ -67,6 +67,21 @@ int drv_ok(void)
     return g_drv != NULL;
 }
 
+int drv_state(void)
+{
+    return g_drv ? DRV_OK : pawnio_state == DRV_OK ? DRV_STOPPED : pawnio_state;
+}
+
+const char *drv_version(void)
+{
+    return pawnio_ver;
+}
+
+const char *drv_missing(void)
+{
+    return pawnio_missing;
+}
+
 const char *drv_name(void)
 {
     const ph_drv *d = g_drv;

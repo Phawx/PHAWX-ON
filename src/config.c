@@ -15,8 +15,10 @@ const wchar_t *cfg_dir(void)
     return dir;
 }
 
-void cfg_load(void)
+/* Resolved on first use, so backends and plugins can read settings before cfg_load. */
+static void cfg_open(void)
 {
+    if (ini[0]) return;
     ph_swprintf(ini, MAX_PATH, L"%s\\phawx.ini", cfg_dir());
     HANDLE f = CreateFileW(ini, GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
     if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
@@ -28,6 +30,17 @@ void cfg_load(void)
             ph_swprintf(ini, MAX_PATH, L"%s\\phawx.ini", dir);
         }
     }
+}
+
+const wchar_t *cfg_file(void)
+{
+    cfg_open();
+    return ini;
+}
+
+void cfg_load(void)
+{
+    cfg_open();
     cfg_load_profile(NULL);
 }
 
@@ -47,8 +60,11 @@ static void sec_for(const wchar_t *exe, wchar_t *out, int n)
 int cfg_get_str(const char *sec, const char *key, char *out, int n)
 {
     wchar_t ws[128], wk[128], wv[512];
-    MultiByteToWideChar(CP_UTF8, 0, sec, -1, ws, 128);
-    MultiByteToWideChar(CP_UTF8, 0, key, -1, wk, 128);
+    cfg_open();
+    if (!MultiByteToWideChar(CP_UTF8, 0, sec, -1, ws, 128) || !MultiByteToWideChar(CP_UTF8, 0, key, -1, wk, 128)) {
+        if (n) out[0] = 0;
+        return 0;
+    }
     DWORD r = GetPrivateProfileStringW(ws, wk, L"\x01", wv, 512, ini);
     if (r == 1 && wv[0] == 1) { if (n) out[0] = 0; return 0; }
     w2a(wv, out, n);
@@ -58,10 +74,18 @@ int cfg_get_str(const char *sec, const char *key, char *out, int n)
 void cfg_set_str(const char *sec, const char *key, const char *v)
 {
     wchar_t ws[128], wk[128], wv[512];
-    MultiByteToWideChar(CP_UTF8, 0, sec, -1, ws, 128);
-    MultiByteToWideChar(CP_UTF8, 0, key, -1, wk, 128);
+    cfg_open();
+    if (!MultiByteToWideChar(CP_UTF8, 0, sec, -1, ws, 128) || !MultiByteToWideChar(CP_UTF8, 0, key, -1, wk, 128))
+        return;
     if (v && !MultiByteToWideChar(CP_UTF8, 0, v, -1, wv, 512)) wv[0] = 0;
     WritePrivateProfileStringW(ws, wk, v ? wv : NULL, ini);
+}
+
+void cfg_clear(const char *sec)
+{
+    wchar_t ws[128];
+    cfg_open();
+    if (MultiByteToWideChar(CP_UTF8, 0, sec, -1, ws, 128)) WritePrivateProfileStringW(ws, NULL, NULL, ini);
 }
 
 int cfg_get_int(const char *sec, const char *key, int def)
@@ -90,9 +114,24 @@ void cfg_set_int(const char *sec, const char *key, int v)
     cfg_set_str(sec, key, b);
 }
 
+int cfg_any_profile(void)
+{
+    DWORD n = 32768, r;
+    int hit = 0;
+    cfg_open();
+    wchar_t *b = ph_alloc(n * sizeof(wchar_t));
+    if (!b) return 0;
+    r = GetPrivateProfileSectionNamesW(b, n, ini);
+    for (wchar_t *s = b; r && s < b + r && *s; s += lstrlenW(s) + 1)
+        if (!_wcsnicmp(s, L"game:", 5)) { hit = 1; break; }
+    ph_free(b);
+    return hit;
+}
+
 int cfg_has_profile(const wchar_t *exe)
 {
     wchar_t s[160], b[8];
+    cfg_open();
     sec_for(exe, s, 160);
     return GetPrivateProfileSectionW(s, b, 8, ini) > 0;
 }

@@ -14,6 +14,7 @@ ph_backend *const ph_backends[] = {
     &bk_display,
     &bk_tweaks,
     &bk_devices,
+    &bk_plugins,    /* last: plugins may look at what the built-ins registered */
     NULL
 };
 
@@ -155,6 +156,20 @@ void ph_backends_shutdown(void)
         if (b->alive && b->shutdown) b->shutdown();
         b->alive = 0;
     }
+}
+
+/* After a crash: built-in hardware first, so a plugin that faults again cannot stop
+   it, then plugins while PawnIO is still open, then the driver. */
+void ph_backends_shutdown_crash(void)
+{
+    for (int pass = 0; pass < 3; pass++)
+        for (int i = PH_ARRAY(ph_backends) - 2; i >= 0; i--) {
+            ph_backend *b = ph_backends[i];
+            int k = b->kind == BK_PLUGIN ? 1 : b->kind == BK_DRIVER ? 2 : 0;
+            if (k != pass) continue;
+            if (b->alive && b->shutdown) b->shutdown();
+            b->alive = 0;
+        }
 }
 
 void ph_backends_resume(void)
