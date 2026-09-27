@@ -1,0 +1,1272 @@
+#include "phawx.h"
+#include <windowsx.h>
+
+#define UI_W    380
+#define HDR_H   72
+#define TAB_H   40
+#define FOOT_H  28
+#define PAD     16
+#define MAXROWS 512
+
+enum { TM_ANIM = 1, TM_LIVE, TM_COMMIT, TM_TOAST, TM_HOLD };
+enum { WM_UI_SHOW = WM_APP + 40, WM_UI_TOAST, WM_UI_NAV, WM_UI_REFRESH };
+enum { DR_NONE, DR_TAP, DR_SCROLL, DR_SLIDER };
+
+#define C_BG     RGB(24, 24, 28)
+#define C_HDR    RGB(33, 33, 39)
+#define C_ROW    RGB(44, 44, 52)
+#define C_SEL    RGB(54, 56, 67)
+#define C_TEXT   RGB(236, 236, 242)
+#define C_DIM    RGB(148, 148, 160)
+#define C_FAINT  RGB(96, 96, 108)
+#define C_ACC    RGB(64, 214, 128)
+#define C_TRACK  RGB(74, 74, 86)
+#define C_DANGER RGB(240, 98, 86)
+#define C_SHADE  RGB(14, 14, 17)
+#define C_TOAST  RGB(58, 60, 72)
+
+static const wchar_t *const tab_names[PG_COUNT] = {
+    L"Quick", L"CPU", L"Power", L"GPU", L"Display", L"System", L"Settings"
+};
+
+static HWND hw, toast_hw;
+static DWORD ui_tid;
+static volatile LONG vis;
+static int dpi = 96, font_dpi;
+static HFONT f_title, f_body, f_small, f_tab, f_bold;
+static HDC bb_dc;
+static HBITMAP bb_bmp, bb_old;
+static int bb_w, bb_h;
+static RECT mon;
+static int pw = 1, ph_h = 1, shown_w, anim_dir;
+
+static int page = PG_QUICK;
+static int tabs[PG_COUNT], ntabs;
+static ph_ctl *rows[MAXROWS], *tmp_rows[MAXROWS];
+static int nrows, row_y[MAXROWS], row_h[MAXROWS], row_vx[MAXROWS], content_h;
+static int32_t hwv[MAXROWS];
+static uint8_t hwok[MAXROWS];
+static int sel = -1, scroll;
+
+static ph_ctl *pend, *conf;
+static int32_t pend_v, conf_v;
+static int conf_btn;
+static uint64_t last_live;
+static RECT rc_close, rc_yes, rc_no;
+
+static wchar_t toast_msg[160];
+static int toast_on, toast_seq, toast_dpi;
+static HFONT toast_font;
+static wchar_t live[160];
+static int live_n;
+
+static int drag, down_x, down_y, down_scroll, down_row, held;
+
+static int S(int v) { return MulDiv(v, dpi, 96); }
+static int on_ui(void) { return GetCurrentThreadId() == ui_tid; }
+static int top_y(void) { return S(HDR_H + TAB_H); }
+static int view_h(void) { return ph_h - S(HDR_H + TAB_H + FOOT_H); }
+static void inval(void) { if (hw) InvalidateRect(hw, NULL, FALSE); }
+
+typedef HRESULT (WINAPI *gdfm_fn)(HMONITOR, int, UINT *, UINT *);
+
+static int mon_dpi(HMONITOR m)
+{
+    static gdfm_fn fn;
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        HMODULE h = LoadLibraryExW(L"shcore.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (h) fn = (gdfm_fn)(void *)GetProcAddress(h, "GetDpiForMonitor");
+    }
+    UINT x = 0, y = 0;
+    if (fn && fn(m, 0, &x, &y) == S_OK && x) return (int)x;
+    HDC dc = GetDC(NULL);
+    int d = GetDeviceCaps(dc, LOGPIXELSX);
+    ReleaseDC(NULL, dc);
+    return d > 0 ? d : 96;
+}
+
+static HMONITOR target_monitor(void)
+{
+    HWND fg = GetForegroundWindow();
+    if (fg && fg != hw && fg != toast_hw) return MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+    POINT p;
+    GetCursorPos(&p);
+    return MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST);
+}
+
+static HFONT mk_font(int px, int weight)
+{
+    return CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+}
+
+static void del_fonts(void)
+{
+    HFONT *f[] = { &f_title, &f_body, &f_small, &f_tab, &f_bold };
+    for (int i = 0; i < PH_ARRAY(f); i++)
+        if (*f[i]) { DeleteObject(*f[i]); *f[i] = NULL; }
+}
+
+static void make_fonts(void)
+{
+    if (font_dpi == dpi && f_body) return;
+    del_fonts();
+    f_title = mk_font(S(24), FW_BOLD);
+    f_body = mk_font(S(15), FW_NORMAL);
+    f_small = mk_font(S(12), FW_NORMAL);
+    f_tab = mk_font(S(13), FW_SEMIBOLD);
+    f_bold = mk_font(S(15), FW_SEMIBOLD);
+    font_dpi = dpi;
+}
+
+static void free_bb(void)
+{
+    if (!bb_dc) return;
+    SelectObject(bb_dc, bb_old);
+    DeleteObject(bb_bmp);
+    DeleteDC(bb_dc);
+    bb_dc = NULL;
+    bb_bmp = NULL;
+}
+
+static int ensure_bb(void)
+{
+    if (bb_dc && bb_w == pw && bb_h == ph_h) return 1;
+    free_bb();
+    HDC s = GetDC(NULL);
+    bb_dc = CreateCompatibleDC(s);
+    bb_bmp = CreateCompatibleBitmap(s, pw, ph_h);
+    ReleaseDC(NULL, s);
+    if (!bb_dc || !bb_bmp) {
+        if (bb_bmp) DeleteObject(bb_bmp);
+        if (bb_dc) DeleteDC(bb_dc);
+        bb_dc = NULL;
+        bb_bmp = NULL;
+        return 0;
+    }
+    bb_old = (HBITMAP)SelectObject(bb_dc, bb_bmp);
+    bb_w = pw;
+    bb_h = ph_h;
+    return 1;
+}
+
+/* ---------- control helpers ---------- */
+
+static int row_visible(const ph_ctl *c)
+{
+    if (c->flags & CF_HIDDEN) return 0;
+    if ((c->flags & CF_ADVANCED) && !ph_advanced()) return 0;
+    return 1;
+}
+
+static int selectable(const ph_ctl *c) { return c->type != CT_HEADER && c->type != CT_INFO; }
+static int locked(const ph_ctl *c) { return (c->flags & CF_AUTOTDP) && c->type != CT_INFO && autotdp_running(); }
+
+static int page_rows(int pg, ph_ctl **out)
+{
+    int n = 0;
+    for (int i = 0, k = ph_ctl_count(); i < k && n < MAXROWS; i++) {
+        ph_ctl *c = ph_ctl_at(i);
+        if (!c || c->page != pg || !row_visible(c)) continue;
+        if (c->type == CT_HEADER && n > 0 && out[n - 1]->type == CT_HEADER) n--;
+        out[n++] = c;
+    }
+    if (n > 0 && out[n - 1]->type == CT_HEADER) n--;
+    return n;
+}
+
+static int32_t base_val(int i)
+{
+    ph_ctl *c = rows[i];
+    return c->active ? c->val : hwok[i] ? hwv[i] : c->def;
+}
+
+static void fmt_val(const ph_ctl *c, int32_t v, wchar_t *b, int n)
+{
+    b[0] = 0;
+    if (c->fmt) { c->fmt(c, v, b, n); return; }
+    if (c->type == CT_CHOICE && c->choices) {
+        if (v >= 0 && v <= c->max && c->choices[v]) lstrcpynW(b, c->choices[v], n);
+        else ph_swprintf(b, n, L"%d", v);
+        return;
+    }
+    if (c->type == CT_TOGGLE) { lstrcpynW(b, v ? L"On" : L"Off", n); return; }
+    const wchar_t *u = c->unit ? c->unit : L"";
+    const wchar_t *sp = (u[0] && u[0] != L'%') ? L" " : L"";
+    ph_swprintf(b, n, ((c->flags & CF_SIGNED) && v > 0) ? L"+%d%s%s" : L"%d%s%s", v, sp, u);
+}
+
+static void refresh_hw(int info_only)
+{
+    for (int i = 0; i < nrows; i++) {
+        ph_ctl *c = rows[i];
+        if (info_only && c->type != CT_INFO) continue;
+        if (!c->get || c->type == CT_HEADER || (c->type != CT_INFO && c->active)) {
+            if (!info_only) hwok[i] = 0;
+            continue;
+        }
+        int32_t v = 0;
+        hwok[i] = c->get(c, &v) == 0;
+        hwv[i] = v;
+    }
+}
+
+static void layout(void)
+{
+    int y = 0;
+    for (int i = 0; i < nrows; i++) {
+        int h;
+        switch (rows[i]->type) {
+        case CT_HEADER: h = i == 0 ? 30 : 40; break;
+        case CT_SLIDER: h = 64; break;
+        case CT_INFO: h = 36; break;
+        default: h = 50; break;
+        }
+        row_y[i] = y;
+        row_h[i] = S(h);
+        y += row_h[i];
+    }
+    content_h = y + S(12);
+}
+
+static void clamp_scroll(void)
+{
+    int mx = content_h - view_h();
+    if (mx < 0) mx = 0;
+    scroll = PH_CLAMP(scroll, 0, mx);
+}
+
+static void ensure_visible(int i)
+{
+    if (i < 0 || i >= nrows) return;
+    int t = row_y[i], b = row_y[i] + row_h[i], vh = view_h();
+    if (i > 0 && rows[i - 1]->type == CT_HEADER) t = row_y[i - 1];
+    if (b > scroll + vh) scroll = b - vh;
+    if (t < scroll) scroll = t;
+    clamp_scroll();
+}
+
+static int first_sel(int from, int dir)
+{
+    for (int i = from; i >= 0 && i < nrows; i += dir)
+        if (selectable(rows[i])) return i;
+    return -1;
+}
+
+static void rebuild(void)
+{
+    ph_ctl *keep = (sel >= 0 && sel < nrows) ? rows[sel] : NULL;
+    ntabs = 0;
+    for (int pg = 0; pg < PG_COUNT; pg++)
+        if (page_rows(pg, tmp_rows) > 0) tabs[ntabs++] = pg;
+    int ok = 0;
+    for (int i = 0; i < ntabs; i++) if (tabs[i] == page) ok = 1;
+    if (!ok && ntabs) { page = tabs[0]; keep = NULL; scroll = 0; }
+    nrows = page_rows(page, rows);
+    refresh_hw(0);
+    sel = -1;
+    for (int i = 0; i < nrows; i++) if (rows[i] == keep) sel = i;
+    if (sel < 0) sel = first_sel(0, 1);
+    if (pend) {
+        int f = 0;
+        for (int i = 0; i < nrows; i++) if (rows[i] == pend) f = 1;
+        if (!f) pend = NULL;
+    }
+    layout();
+    clamp_scroll();
+}
+
+/* ---------- applying ---------- */
+
+static void apply_val(ph_ctl *c, int32_t v, int confirmed)
+{
+    if (!c) return;
+    if ((c->flags & CF_DANGER) && !confirmed) {
+        conf = c;
+        conf_v = v;
+        conf_btn = 0;
+        inval();
+        return;
+    }
+    int seq = toast_seq;
+    int r = ph_ctl_apply(c, v);
+    if (r) {
+        if (seq == toast_seq && c->type != CT_ACTION) {
+            wchar_t m[96];
+            ph_swprintf(m, PH_ARRAY(m), L"Could not apply %s", c->label ? c->label : L"setting");
+            ui_toast(m);
+        }
+    } else if (!(c->flags & CF_NOSAVE) || c->type != CT_ACTION) {
+        cfg_mark_dirty();
+    }
+    app_tray_update();
+    if (hw && vis) rebuild();
+    inval();
+}
+
+static void commit_pending(void)
+{
+    if (!pend) return;
+    if (hw) KillTimer(hw, TM_COMMIT);
+    ph_ctl *c = pend;
+    int32_t v = pend_v;
+    pend = NULL;
+    if (!c->active || c->val != v) apply_val(c, v, 0);
+    inval();
+}
+
+static void set_pending(ph_ctl *c, int32_t v, int from_drag)
+{
+    v = PH_CLAMP(v, c->min, c->max);
+    if (pend == c && pend_v == v) return;
+    pend = c;
+    pend_v = v;
+    if ((c->flags & CF_LIVE) && !(c->flags & CF_DANGER)) {
+        if (!from_drag || ph_ms() - last_live >= 60) {
+            last_live = ph_ms();
+            if (ph_ctl_apply(c, v) == 0) cfg_mark_dirty();
+        }
+    }
+    if (!from_drag) SetTimer(hw, TM_COMMIT, 450, NULL);
+    inval();
+}
+
+static void reset_sel(void)
+{
+    if (sel < 0 || sel >= nrows) return;
+    ph_ctl *c = rows[sel];
+    if (!selectable(c) || c->type == CT_ACTION || locked(c)) return;
+    if (pend == c) { pend = NULL; KillTimer(hw, TM_COMMIT); }
+    if (!c->active) return;
+    ph_ctl_reset(c);
+    cfg_mark_dirty();
+    wchar_t m[96];
+    ph_swprintf(m, PH_ARRAY(m), L"%s set to Default", c->label ? c->label : L"Setting");
+    ui_toast(m);
+    rebuild();
+    inval();
+}
+
+static void toggle_autotdp(void)
+{
+    ph_ctl *c = ph_ctl_find("autotdp.on");
+    int want = !autotdp_running();
+    if (c && !(c->flags & CF_HIDDEN) && c->type == CT_TOGGLE) {
+        apply_val(c, want, 1);
+    } else {
+        if (want) autotdp_start(); else autotdp_stop();
+        app_tray_update();
+    }
+    ui_toast(autotdp_running() ? L"Phawx ON: AutoTDP running" : L"Phawx OFF: AutoTDP stopped");
+    if (vis) rebuild();
+    inval();
+}
+
+static void confirm_close(int yes)
+{
+    ph_ctl *c = conf;
+    conf = NULL;
+    if (yes && c) apply_val(c, conf_v, 1);
+    else if (vis) rebuild();
+    inval();
+}
+
+/* ---------- navigation ---------- */
+
+static void move_sel(int d)
+{
+    commit_pending();
+    if (!nrows) return;
+    int n = sel < 0 ? first_sel(d > 0 ? 0 : nrows - 1, d) : first_sel(sel + d, d);
+    if (n >= 0) sel = n;
+    else if (d < 0) scroll = 0;
+    else scroll = content_h;
+    clamp_scroll();
+    if (n >= 0) ensure_visible(sel);
+}
+
+static void switch_tab(int d)
+{
+    commit_pending();
+    if (ntabs < 1) return;
+    int idx = 0;
+    for (int i = 0; i < ntabs; i++) if (tabs[i] == page) idx = i;
+    idx = (idx + d + ntabs) % ntabs;
+    page = tabs[idx];
+    sel = -1;
+    scroll = 0;
+    rebuild();
+}
+
+static void goto_tab(int idx)
+{
+    if (idx < 0 || idx >= ntabs || tabs[idx] == page) return;
+    commit_pending();
+    page = tabs[idx];
+    sel = -1;
+    scroll = 0;
+    rebuild();
+}
+
+static ph_ctl *cur(void) { return (sel >= 0 && sel < nrows) ? rows[sel] : NULL; }
+
+static void adjust(int d)
+{
+    ph_ctl *c = cur();
+    if (!c) return;
+    if (locked(c)) { ui_toast(L"Managed by AutoTDP"); return; }
+    int32_t b = pend == c ? pend_v : base_val(sel), v;
+    switch (c->type) {
+    case CT_SLIDER:
+        set_pending(c, b + d * c->step, 0);
+        break;
+    case CT_TOGGLE:
+        v = d > 0 ? 1 : 0;
+        if (c->active && c->val == v) return;
+        apply_val(c, v, 0);
+        break;
+    case CT_CHOICE:
+        v = b + d;
+        if (v < c->min || v > c->max) return;
+        apply_val(c, v, 0);
+        break;
+    }
+}
+
+static void activate(void)
+{
+    ph_ctl *c = cur();
+    if (!c) return;
+    if (locked(c)) { ui_toast(L"Managed by AutoTDP"); return; }
+    int32_t b = base_val(sel), v;
+    switch (c->type) {
+    case CT_SLIDER: commit_pending(); break;
+    case CT_TOGGLE: apply_val(c, !b, 0); break;
+    case CT_CHOICE:
+        v = b + 1;
+        if (v > c->max) v = c->min;
+        apply_val(c, v, 0);
+        break;
+    case CT_ACTION: apply_val(c, c->val, 0); break;
+    }
+}
+
+void ui_nav(int a)
+{
+    if (!hw) return;
+    if (!on_ui()) { PostMessageW(hw, WM_UI_NAV, (WPARAM)a, 0); return; }
+    if (a == IN_TOGGLE_MENU) { ui_toggle(); return; }
+    if (!vis) return;
+    if (conf) {
+        switch (a) {
+        case IN_LEFT: case IN_UP: conf_btn = 0; break;
+        case IN_RIGHT: case IN_DOWN: conf_btn = 1; break;
+        case IN_OK: confirm_close(conf_btn); break;
+        case IN_BACK: confirm_close(0); break;
+        }
+        inval();
+        return;
+    }
+    switch (a) {
+    case IN_UP: move_sel(-1); break;
+    case IN_DOWN: move_sel(1); break;
+    case IN_LEFT: adjust(-1); break;
+    case IN_RIGHT: adjust(1); break;
+    case IN_OK: activate(); break;
+    case IN_BACK: ui_show(0); break;
+    case IN_TAB_PREV: switch_tab(-1); break;
+    case IN_TAB_NEXT: switch_tab(1); break;
+    case IN_AUX: toggle_autotdp(); break;
+    case IN_RESET: reset_sel(); break;
+    }
+    inval();
+}
+
+/* ---------- live strip ---------- */
+
+static void join(wchar_t *b, int n, const wchar_t *part)
+{
+    if (!part[0]) return;
+    int l = lstrlenW(b);
+    if (l) ph_swprintf(b + l, n - l, L"  \x00B7  %s", part);
+    else lstrcpynW(b, part, n);
+}
+
+static void fmt_clock(wchar_t *b, int n, const wchar_t *tag, int mhz)
+{
+    b[0] = 0;
+    if (mhz <= 0) return;
+    if (mhz >= 1000) ph_swprintf(b, n, L"%s %d.%d GHz", tag, mhz / 1000, (mhz % 1000) / 100);
+    else ph_swprintf(b, n, L"%s %d MHz", tag, mhz);
+}
+
+static void update_live(void)
+{
+    ph_fps f;
+    ph_auto_state st;
+    wchar_t t[48];
+    int cpu = 0, gpu = 0, run = autotdp_running();
+    live[0] = 0;
+    if (fps_sample(&f) && f.fps > 0.5f) {
+        if (f.low1 > 0.5f) ph_swprintf(t, PH_ARRAY(t), L"%d FPS (1%% %d)", (int)(f.fps + 0.5f), (int)(f.low1 + 0.5f));
+        else ph_swprintf(t, PH_ARRAY(t), L"%d FPS", (int)(f.fps + 0.5f));
+        join(live, PH_ARRAY(live), t);
+    }
+    if (run) {
+        autotdp_state(&st);
+        cpu = st.cpu_mhz;
+        gpu = st.gpu_mhz;
+    } else {
+        ph_clk *d = ph_cpu_clk();
+        if (d && d->cur && d->cur(d, &cpu)) cpu = 0;
+        d = ph_gpu_clk();
+        if (d && d->cur && d->cur(d, &gpu)) gpu = 0;
+    }
+    fmt_clock(t, PH_ARRAY(t), L"CPU", cpu);
+    join(live, PH_ARRAY(live), t);
+    fmt_clock(t, PH_ARRAY(t), L"GPU", gpu);
+    join(live, PH_ARRAY(live), t);
+    if (run && st.target > 0) {
+        ph_swprintf(t, PH_ARRAY(t), L"Target %d", st.target);
+        join(live, PH_ARRAY(live), t);
+    }
+    if (!live[0]) lstrcpynW(live, run ? L"AutoTDP waiting for a game" : L"No game detected", PH_ARRAY(live));
+}
+
+/* ---------- drawing ---------- */
+
+static void fill(HDC m, int l, int t, int r, int b, COLORREF c)
+{
+    RECT rc = { l, t, r, b };
+    SetDCBrushColor(m, c);
+    FillRect(m, &rc, (HBRUSH)GetStockObject(DC_BRUSH));
+}
+
+static void rrect(HDC m, int l, int t, int r, int b, int rad, COLORREF c)
+{
+    SelectObject(m, GetStockObject(DC_BRUSH));
+    SelectObject(m, GetStockObject(DC_PEN));
+    SetDCBrushColor(m, c);
+    SetDCPenColor(m, c);
+    RoundRect(m, l, t, r, b, rad, rad);
+}
+
+static void circle(HDC m, int cx, int cy, int rad, COLORREF c)
+{
+    SelectObject(m, GetStockObject(DC_BRUSH));
+    SelectObject(m, GetStockObject(DC_PEN));
+    SetDCBrushColor(m, c);
+    SetDCPenColor(m, c);
+    Ellipse(m, cx - rad, cy - rad, cx + rad + 1, cy + rad + 1);
+}
+
+static void text(HDC m, HFONT f, COLORREF c, const wchar_t *s, int l, int t, int r, int b, UINT fl)
+{
+    RECT rc = { l, t, r, b };
+    if (!s || r <= l) return;
+    SelectObject(m, f);
+    SetTextColor(m, c);
+    DrawTextW(m, s, -1, &rc, fl | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+}
+
+static int text_w(HDC m, HFONT f, const wchar_t *s)
+{
+    SIZE z = { 0, 0 };
+    SelectObject(m, f);
+    GetTextExtentPoint32W(m, s, lstrlenW(s), &z);
+    return z.cx;
+}
+
+static COLORREF value_text(int i, wchar_t *b, int n)
+{
+    ph_ctl *c = rows[i];
+    b[0] = 0;
+    if (locked(c)) { lstrcpynW(b, L"AutoTDP", n); return C_ACC; }
+    if (pend == c) { fmt_val(c, pend_v, b, n); return C_TEXT; }
+    if (c->type == CT_INFO) { fmt_val(c, hwok[i] ? hwv[i] : c->val, b, n); return C_TEXT; }
+    if (c->type == CT_ACTION) { if (c->fmt) c->fmt(c, c->val, b, n); return C_DIM; }
+    if ((c->flags & CF_OPTIONAL) && !c->active) {
+        if (hwok[i]) {
+            wchar_t t[64];
+            fmt_val(c, hwv[i], t, PH_ARRAY(t));
+            ph_swprintf(b, n, L"Default (%s)", t);
+        } else {
+            lstrcpynW(b, L"Default", n);
+        }
+        return C_DIM;
+    }
+    fmt_val(c, base_val(i), b, n);
+    return C_ACC;
+}
+
+static void draw_row(HDC m, int i, int y)
+{
+    ph_ctl *c = rows[i];
+    int h = row_h[i], x0 = S(PAD), x1 = pw - S(PAD);
+    int lk = locked(c);
+    wchar_t v[128];
+    row_vx[i] = x1;
+    if (c->type == CT_HEADER) {
+        text(m, f_small, C_ACC, c->label, x0, y + h - S(24), x1, y + h - S(4), DT_LEFT);
+        return;
+    }
+    if (i == sel) rrect(m, S(8), y + S(2), pw - S(8), y + h - S(2), S(12), C_SEL);
+    COLORREF lc = lk ? C_FAINT : (c->flags & CF_DANGER) ? C_DANGER : C_TEXT;
+    COLORREF vc = value_text(i, v, PH_ARRAY(v));
+    int vw = v[0] ? text_w(m, f_body, v) : 0;
+
+    switch (c->type) {
+    case CT_SLIDER: {
+        int ly = y + S(8), lb = y + S(32);
+        int vx = x1 - vw;
+        if (vx < x0 + (x1 - x0) / 3) vx = x0 + (x1 - x0) / 3;
+        row_vx[i] = vx;
+        text(m, f_body, lc, c->label, x0, ly, vx - S(8), lb, DT_LEFT);
+        text(m, f_body, vc, v, vx, ly, x1, lb, DT_RIGHT);
+        int32_t cv = pend == c ? pend_v : base_val(i);
+        int range = c->max - c->min;
+        int ty = y + S(46), kx0 = x0 + S(8), kx1 = x1 - S(8);
+        int kx = range > 0 ? kx0 + (int)((int64_t)(cv - c->min) * (kx1 - kx0) / range) : kx0;
+        kx = PH_CLAMP(kx, kx0, kx1);
+        int on = (c->active || pend == c) && !lk;
+        rrect(m, kx0, ty - S(2), kx1, ty + S(2), S(4), C_TRACK);
+        rrect(m, kx0, ty - S(2), kx, ty + S(2), S(4), on ? C_ACC : C_FAINT);
+        circle(m, kx, ty, S(8), lk ? C_FAINT : on ? C_TEXT : C_DIM);
+        break;
+    }
+    case CT_TOGGLE: {
+        int sw = S(44), sh = S(24), sx = x1 - sw, sy = y + (h - sh) / 2;
+        int optdef = (c->flags & CF_OPTIONAL) && !c->active && pend != c;
+        int on = base_val(i) != 0;
+        int lx = sx - S(8);
+        if (optdef || lk) {
+            const wchar_t *d = lk ? L"AutoTDP" : L"Default";
+            int dw = text_w(m, f_small, d);
+            text(m, f_small, lk ? C_ACC : C_DIM, d, lx - dw, y, lx, y + h, DT_RIGHT);
+            lx -= dw + S(8);
+        }
+        row_vx[i] = sx;
+        text(m, f_body, lc, c->label, x0, y, lx, y + h, DT_LEFT);
+        COLORREF tc = on ? ((optdef || lk) ? C_FAINT : C_ACC) : C_TRACK;
+        rrect(m, sx, sy, sx + sw, sy + sh, sh, tc);
+        int r = sh / 2 - S(3);
+        circle(m, on ? sx + sw - sh / 2 : sx + sh / 2, sy + sh / 2, r, optdef ? C_DIM : C_TEXT);
+        break;
+    }
+    case CT_CHOICE: {
+        int aw = text_w(m, f_body, L"\x2039 ");
+        int total = vw + 2 * aw;
+        int vx = x1 - total;
+        if (vx < x0 + (x1 - x0) / 3) vx = x0 + (x1 - x0) / 3;
+        row_vx[i] = vx;
+        text(m, f_body, lc, c->label, x0, y, vx - S(8), y + h, DT_LEFT);
+        COLORREF ac = lk ? C_FAINT : C_DIM;
+        text(m, f_body, ac, L"\x2039", vx, y, vx + aw, y + h, DT_LEFT);
+        text(m, f_body, vc, v, vx + aw, y, x1 - aw, y + h, DT_CENTER);
+        text(m, f_body, ac, L"\x203A", x1 - aw, y, x1, y + h, DT_RIGHT);
+        break;
+    }
+    case CT_ACTION: {
+        int cw = text_w(m, f_body, L"\x203A");
+        int vx = x1 - cw - (vw ? vw + S(10) : 0);
+        if (vx < x0 + (x1 - x0) / 2) vx = x0 + (x1 - x0) / 2;
+        row_vx[i] = vx;
+        text(m, f_bold, lc, c->label, x0, y, vx - S(8), y + h, DT_LEFT);
+        if (vw) text(m, f_body, vc, v, vx, y, x1 - cw - S(10), y + h, DT_RIGHT);
+        text(m, f_body, C_DIM, L"\x203A", x1 - cw, y, x1, y + h, DT_RIGHT);
+        break;
+    }
+    case CT_INFO: {
+        int iw = v[0] ? text_w(m, f_small, v) : 0;
+        int vx = x1 - iw;
+        if (vx < x0 + (x1 - x0) * 2 / 5) vx = x0 + (x1 - x0) * 2 / 5;
+        row_vx[i] = vx;
+        text(m, f_small, C_DIM, c->label, x0, y, vx - S(8), y + h, DT_LEFT);
+        text(m, f_small, C_TEXT, v, vx, y, x1, y + h, DT_RIGHT);
+        break;
+    }
+    }
+}
+
+static void draw_close(HDC m)
+{
+    rc_close.left = pw - S(52);
+    rc_close.top = S(10);
+    rc_close.right = pw - S(8);
+    rc_close.bottom = S(54);
+    int cx = (rc_close.left + rc_close.right) / 2, cy = (rc_close.top + rc_close.bottom) / 2, r = S(7);
+    HPEN p = CreatePen(PS_SOLID, S(2) > 0 ? S(2) : 1, C_DIM);
+    HGDIOBJ o = SelectObject(m, p);
+    MoveToEx(m, cx - r, cy - r, NULL);
+    LineTo(m, cx + r + 1, cy + r + 1);
+    MoveToEx(m, cx + r, cy - r, NULL);
+    LineTo(m, cx - r - 1, cy + r + 1);
+    SelectObject(m, o);
+    DeleteObject(p);
+}
+
+static void draw_confirm(HDC m)
+{
+    int t = top_y(), vh = view_h();
+    fill(m, 0, t, pw, t + vh, C_SHADE);
+    int bh = S(176), bx0 = S(20), bx1 = pw - S(20);
+    int by = t + (vh - bh) / 2;
+    if (by < t) by = t;
+    rrect(m, bx0, by, bx1, by + bh, S(16), C_ROW);
+    text(m, f_bold, C_DANGER, L"Confirm change", bx0 + S(16), by + S(12), bx1 - S(16), by + S(40), DT_LEFT);
+    wchar_t v[64], msg[256];
+    v[0] = 0;
+    if (conf->type == CT_SLIDER || conf->type == CT_CHOICE || conf->type == CT_TOGGLE)
+        fmt_val(conf, conf_v, v, PH_ARRAY(v));
+    const wchar_t *lbl = conf->label ? conf->label : L"Apply";
+    if (v[0]) ph_swprintf(msg, PH_ARRAY(msg), L"Set %s to %s? This can cause instability.", lbl, v);
+    else ph_swprintf(msg, PH_ARRAY(msg), L"%s? This cannot be undone.", lbl);
+    RECT mr = { bx0 + S(16), by + S(44), bx1 - S(16), by + S(112) };
+    SelectObject(m, f_body);
+    SetTextColor(m, C_TEXT);
+    DrawTextW(m, msg, -1, &mr, DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS);
+    int gy = by + bh - S(52), gh = S(40), mid = (bx0 + bx1) / 2;
+    SetRect(&rc_no, bx0 + S(12), gy, mid - S(6), gy + gh);
+    SetRect(&rc_yes, mid + S(6), gy, bx1 - S(12), gy + gh);
+    if (conf_btn == 0) rrect(m, rc_no.left - S(2), rc_no.top - S(2), rc_no.right + S(2), rc_no.bottom + S(2), S(12), C_ACC);
+    else rrect(m, rc_yes.left - S(2), rc_yes.top - S(2), rc_yes.right + S(2), rc_yes.bottom + S(2), S(12), C_DANGER);
+    rrect(m, rc_no.left, rc_no.top, rc_no.right, rc_no.bottom, S(10), C_SEL);
+    rrect(m, rc_yes.left, rc_yes.top, rc_yes.right, rc_yes.bottom, S(10), C_SEL);
+    text(m, f_bold, C_TEXT, L"Cancel", rc_no.left, rc_no.top, rc_no.right, rc_no.bottom, DT_CENTER);
+    text(m, f_bold, C_DANGER, L"Apply", rc_yes.left, rc_yes.top, rc_yes.right, rc_yes.bottom, DT_CENTER);
+}
+
+static void render(HDC m)
+{
+    int t = top_y(), vh = view_h();
+    SetBkMode(m, TRANSPARENT);
+    fill(m, 0, 0, pw, ph_h, C_BG);
+
+    for (int i = 0; i < nrows; i++) {
+        int y = t + row_y[i] - scroll;
+        if (y + row_h[i] < t || y > t + vh) continue;
+        draw_row(m, i, y);
+    }
+    if (!nrows) text(m, f_body, C_DIM, L"Nothing to adjust here", 0, t, pw, t + S(80), DT_CENTER);
+    if (content_h > vh && vh > 0) {
+        int th = vh * vh / content_h, ty = t + (int)((int64_t)scroll * (vh - th) / (content_h - vh));
+        fill(m, pw - S(4), ty, pw - S(1), ty + th, C_FAINT);
+    }
+
+    fill(m, 0, 0, pw, S(HDR_H), C_HDR);
+    int run = autotdp_running();
+    text(m, f_title, run ? C_ACC : C_TEXT, run ? L"Phawx ON" : L"Phawx OFF", S(PAD), S(8), pw - S(56), S(42), DT_LEFT);
+    text(m, f_small, C_DIM, live, S(PAD), S(42), pw - S(56), S(64), DT_LEFT);
+    draw_close(m);
+
+    fill(m, 0, S(HDR_H), pw, t, C_HDR);
+    fill(m, 0, t - 1, pw, t, C_ROW);
+    for (int k = 0; k < ntabs; k++) {
+        int l = pw * k / ntabs, r = pw * (k + 1) / ntabs, cur_t = tabs[k] == page;
+        text(m, f_tab, cur_t ? C_TEXT : C_DIM, tab_names[tabs[k]], l, S(HDR_H), r, t - S(4), DT_CENTER);
+        if (cur_t) rrect(m, l + S(10), t - S(4), r - S(10), t, S(3), C_ACC);
+    }
+
+    int fy = ph_h - S(FOOT_H);
+    fill(m, 0, fy, pw, ph_h, C_HDR);
+    const wchar_t *hint = L"LB / RB pages  \x00B7  B closes";
+    ph_ctl *c = cur();
+    if (conf) hint = L"A confirms  \x00B7  B cancels";
+    else if (c && locked(c)) hint = L"Locked while AutoTDP runs";
+    else if (c && c->active && (c->flags & CF_OPTIONAL) && c->type != CT_ACTION) hint = L"Hold or press Reset to restore Default";
+    text(m, f_small, C_FAINT, hint, S(PAD), fy, pw - S(PAD), ph_h, DT_CENTER);
+
+    if (conf) draw_confirm(m);
+
+    if (toast_on && toast_msg[0]) {
+        int tw = text_w(m, f_body, toast_msg) + S(32);
+        if (tw > pw - S(24)) tw = pw - S(24);
+        int th = S(40), tx = (pw - tw) / 2, ty = fy - th - S(12);
+        rrect(m, tx, ty, tx + tw, ty + th, S(14), C_TOAST);
+        text(m, f_body, C_TEXT, toast_msg, tx + S(14), ty, tx + tw - S(14), ty + th, DT_CENTER);
+    }
+}
+
+static void on_paint(void)
+{
+    PAINTSTRUCT ps;
+    HDC dc = BeginPaint(hw, &ps);
+    make_fonts();
+    if (ensure_bb()) {
+        render(bb_dc);
+        BitBlt(dc, 0, 0, shown_w, ph_h, bb_dc, 0, 0, SRCCOPY);
+    }
+    EndPaint(hw, &ps);
+}
+
+/* ---------- show / hide ---------- */
+
+static void place(void)
+{
+    HMONITOR hm = target_monitor();
+    MONITORINFO mi = { sizeof mi };
+    if (!GetMonitorInfoW(hm, &mi)) SystemParametersInfoW(SPI_GETWORKAREA, 0, &mi.rcWork, 0);
+    mon = mi.rcWork;
+    dpi = mon_dpi(hm);
+    make_fonts();
+    pw = S(UI_W);
+    if (pw > mon.right - mon.left) pw = mon.right - mon.left;
+    ph_h = mon.bottom - mon.top;
+    if (pw < 1) pw = 1;
+    if (ph_h < 1) ph_h = 1;
+    layout();
+    clamp_scroll();
+}
+
+static void set_shown(int w)
+{
+    if (w < 1) w = 1;
+    if (w > pw) w = pw;
+    shown_w = w;
+    SetWindowPos(hw, HWND_TOPMOST, mon.right - w, mon.top, w, ph_h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+static void anim_step(void)
+{
+    int target = anim_dir > 0 ? pw : 0;
+    int d = target - shown_w;
+    int stepv = d * 35 / 100;
+    int mn = S(14);
+    if (d > 0 && stepv < mn) stepv = mn < d ? mn : d;
+    if (d < 0 && stepv > -mn) stepv = -mn > d ? -mn : d;
+    int w = shown_w + stepv;
+    if ((anim_dir > 0 && w >= pw) || (anim_dir < 0 && w <= 1) || d == 0) {
+        KillTimer(hw, TM_ANIM);
+        if (anim_dir > 0) {
+            set_shown(pw);
+        } else {
+            ShowWindow(hw, SW_HIDE);
+            shown_w = 0;
+            free_bb();
+        }
+        anim_dir = 0;
+    } else {
+        set_shown(w);
+    }
+    RedrawWindow(hw, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW);
+}
+
+static void toast_hide(void)
+{
+    if (toast_hw) { KillTimer(toast_hw, TM_TOAST); ShowWindow(toast_hw, SW_HIDE); }
+}
+
+void ui_show(int show)
+{
+    if (!hw) return;
+    if (!on_ui()) { PostMessageW(hw, WM_UI_SHOW, (WPARAM)(show ? 1 : 0), 0); return; }
+    if (show) {
+        if (vis) return;
+        toast_hide();
+        page = PG_QUICK;
+        sel = -1;
+        scroll = 0;
+        place();
+        rebuild();
+        if (sel >= 0) ensure_visible(sel);
+        InterlockedExchange(&vis, 1);
+        fps_start();
+        input_menu_open(1);
+        update_live();
+        live_n = 0;
+        SetTimer(hw, TM_LIVE, 500, NULL);
+        if (!IsWindowVisible(hw)) shown_w = 0;
+        anim_dir = 1;
+        if (!shown_w) set_shown(1);
+        SetTimer(hw, TM_ANIM, 10, NULL);
+    } else {
+        if (!vis) return;
+        commit_pending();
+        conf = NULL;
+        drag = DR_NONE;
+        if (GetCapture() == hw) ReleaseCapture();
+        KillTimer(hw, TM_HOLD);
+        KillTimer(hw, TM_LIVE);
+        InterlockedExchange(&vis, 0);
+        input_menu_open(0);
+        if (!autotdp_running()) fps_stop();
+        anim_dir = -1;
+        SetTimer(hw, TM_ANIM, 10, NULL);
+    }
+}
+
+void ui_toggle(void)
+{
+    if (!hw) return;
+    if (!on_ui()) { PostMessageW(hw, WM_UI_SHOW, 2, 0); return; }
+    ui_show(!vis);
+}
+
+int ui_visible(void) { return vis != 0; }
+HWND ui_hwnd(void) { return hw; }
+
+void ui_refresh(void)
+{
+    if (!hw) return;
+    if (!on_ui()) { PostMessageW(hw, WM_UI_REFRESH, 0, 0); return; }
+    if (!vis) return;
+    if (!anim_dir) {
+        RECT old = mon;
+        int od = dpi;
+        place();
+        if (!EqualRect(&old, &mon) || od != dpi) set_shown(pw);
+    }
+    rebuild();
+    update_live();
+    inval();
+}
+
+/* ---------- toasts ---------- */
+
+static void show_toast_window(void)
+{
+    if (!toast_hw) return;
+    HMONITOR hm = target_monitor();
+    MONITORINFO mi = { sizeof mi };
+    if (!GetMonitorInfoW(hm, &mi)) return;
+    int d = mon_dpi(hm);
+    if (!toast_font || toast_dpi != d) {
+        if (toast_font) DeleteObject(toast_font);
+        toast_font = mk_font(MulDiv(15, d, 96), FW_NORMAL);
+        toast_dpi = d;
+    }
+    HDC dc = GetDC(toast_hw);
+    HGDIOBJ o = SelectObject(dc, toast_font);
+    SIZE z = { 0, 0 };
+    GetTextExtentPoint32W(dc, toast_msg, lstrlenW(toast_msg), &z);
+    SelectObject(dc, o);
+    ReleaseDC(toast_hw, dc);
+    int mw = mi.rcWork.right - mi.rcWork.left;
+    int w = z.cx + MulDiv(40, d, 96), h = MulDiv(44, d, 96);
+    if (w > mw - MulDiv(32, d, 96)) w = mw - MulDiv(32, d, 96);
+    if (w < h) w = h;
+    int x = mi.rcWork.left + (mw - w) / 2, y = mi.rcWork.bottom - h - MulDiv(56, d, 96);
+    int rad = MulDiv(16, d, 96);
+    SetWindowRgn(toast_hw, CreateRoundRectRgn(0, 0, w + 1, h + 1, rad, rad), FALSE);
+    SetWindowPos(toast_hw, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(toast_hw, NULL, TRUE);
+    SetTimer(toast_hw, TM_TOAST, 2800, NULL);
+}
+
+void ui_toast(const wchar_t *msg)
+{
+    if (!msg) return;
+    if (!hw) { ph_log("toast: %ls", msg); return; }
+    if (!on_ui()) {
+        int n = lstrlenW(msg) + 1;
+        wchar_t *c = ph_alloc((size_t)n * sizeof(wchar_t));
+        if (!c) return;
+        lstrcpyW(c, msg);
+        if (!PostMessageW(hw, WM_UI_TOAST, 0, (LPARAM)c)) ph_free(c);
+        return;
+    }
+    lstrcpynW(toast_msg, msg, PH_ARRAY(toast_msg));
+    toast_seq++;
+    if (vis) {
+        toast_on = 1;
+        SetTimer(hw, TM_TOAST, 2500, NULL);
+        inval();
+    } else {
+        show_toast_window();
+    }
+}
+
+static LRESULT CALLBACK toast_proc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    switch (m) {
+    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_POINTERACTIVATE: return PA_NOACTIVATE;
+    case WM_ERASEBKGND: return 1;
+    case WM_LBUTTONUP: toast_hide(); return 0;
+    case WM_TIMER:
+        if (w == TM_TOAST) toast_hide();
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT rc;
+        GetClientRect(h, &rc);
+        SetDCBrushColor(dc, C_TOAST);
+        FillRect(dc, &rc, (HBRUSH)GetStockObject(DC_BRUSH));
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, C_TEXT);
+        HGDIOBJ o = SelectObject(dc, toast_font ? (HGDIOBJ)toast_font : GetStockObject(DEFAULT_GUI_FONT));
+        InflateRect(&rc, -MulDiv(12, toast_dpi ? toast_dpi : 96, 96), 0);
+        DrawTextW(dc, toast_msg, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        SelectObject(dc, o);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+/* ---------- pointer ---------- */
+
+static int hit_row(int y)
+{
+    int cy = y - top_y() + scroll;
+    for (int i = 0; i < nrows; i++)
+        if (cy >= row_y[i] && cy < row_y[i] + row_h[i]) return i;
+    return -1;
+}
+
+static void slider_to(int i, int x)
+{
+    ph_ctl *c = rows[i];
+    int kx0 = S(PAD) + S(8), kx1 = pw - S(PAD) - S(8);
+    int range = c->max - c->min;
+    if (range <= 0 || kx1 <= kx0) return;
+    int px = PH_CLAMP(x, kx0, kx1) - kx0;
+    int st = c->step > 0 ? c->step : 1;
+    int64_t raw = (int64_t)px * range / (kx1 - kx0);
+    int32_t v = c->min + (int32_t)((raw + st / 2) / st) * st;
+    set_pending(c, v, 1);
+}
+
+static void press(int x, int y)
+{
+    KillTimer(hw, TM_HOLD);
+    held = 0;
+    down_x = x;
+    down_y = y;
+    down_scroll = scroll;
+    down_row = -1;
+    drag = DR_TAP;
+    if (conf || y < top_y() || y >= ph_h - S(FOOT_H)) return;
+    int i = hit_row(y);
+    down_row = i;
+    if (i < 0 || !selectable(rows[i])) return;
+    if (sel != i) { commit_pending(); sel = i; }
+    ph_ctl *c = rows[i];
+    int ry = top_y() + row_y[i] - scroll;
+    if (c->type == CT_SLIDER && !locked(c) && y >= ry + S(32)) {
+        drag = DR_SLIDER;
+        KillTimer(hw, TM_COMMIT);
+        slider_to(i, x);
+    } else {
+        SetTimer(hw, TM_HOLD, 600, NULL);
+    }
+    inval();
+}
+
+static void move(int x, int y)
+{
+    (void)x;
+    if (drag == DR_SLIDER && sel >= 0 && sel < nrows) { slider_to(sel, x); return; }
+    if (drag == DR_TAP && down_row >= 0 && (y - down_y > S(10) || down_y - y > S(10))) {
+        drag = DR_SCROLL;
+        KillTimer(hw, TM_HOLD);
+    }
+    if (drag == DR_SCROLL) {
+        scroll = down_scroll - (y - down_y);
+        clamp_scroll();
+        inval();
+    }
+}
+
+static int in_rc(const RECT *r, int x, int y) { return x >= r->left && x < r->right && y >= r->top && y < r->bottom; }
+
+static void tap(int x, int y)
+{
+    if (conf) {
+        if (in_rc(&rc_yes, x, y)) confirm_close(1);
+        else if (in_rc(&rc_no, x, y)) confirm_close(0);
+        return;
+    }
+    if (y < S(HDR_H)) {
+        if (in_rc(&rc_close, x, y)) ui_show(0);
+        return;
+    }
+    if (y < top_y()) {
+        if (ntabs) goto_tab(x * ntabs / (pw > 0 ? pw : 1));
+        return;
+    }
+    if (y >= ph_h - S(FOOT_H)) return;
+    int i = hit_row(y);
+    if (i < 0 || i != down_row || i != sel) return;
+    ph_ctl *c = rows[i];
+    if (locked(c)) { ui_toast(L"Managed by AutoTDP"); return; }
+    if (c->type == CT_CHOICE) {
+        int aw = S(24);
+        if (x >= row_vx[i] - S(8) && x < row_vx[i] + aw) {
+            int32_t v = base_val(i) - 1;
+            if (v < c->min) v = c->max;
+            apply_val(c, v, 0);
+        } else {
+            activate();
+        }
+    } else if (c->type == CT_TOGGLE || c->type == CT_ACTION) {
+        activate();
+    }
+}
+
+static void release(int x, int y)
+{
+    KillTimer(hw, TM_HOLD);
+    int d = drag;
+    drag = DR_NONE;
+    if (d == DR_SLIDER) commit_pending();
+    else if (d == DR_TAP && !held) tap(x, y);
+    inval();
+}
+
+static void pt_client(LPARAM l, int *x, int *y)
+{
+    POINT p = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
+    ScreenToClient(hw, &p);
+    *x = p.x;
+    *y = p.y;
+}
+
+static void key(WPARAM vk)
+{
+    int shift = GetKeyState(VK_SHIFT) < 0;
+    switch (vk) {
+    case VK_UP: ui_nav(IN_UP); break;
+    case VK_DOWN: ui_nav(IN_DOWN); break;
+    case VK_LEFT: ui_nav(IN_LEFT); break;
+    case VK_RIGHT: ui_nav(IN_RIGHT); break;
+    case VK_RETURN: case VK_SPACE: ui_nav(IN_OK); break;
+    case VK_ESCAPE: ui_nav(IN_BACK); break;
+    case VK_TAB: ui_nav(shift ? IN_TAB_PREV : IN_TAB_NEXT); break;
+    case VK_PRIOR: ui_nav(IN_TAB_PREV); break;
+    case VK_NEXT: ui_nav(IN_TAB_NEXT); break;
+    case VK_DELETE: case VK_BACK: ui_nav(IN_RESET); break;
+    case VK_F2: ui_nav(IN_AUX); break;
+    }
+}
+
+static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    int x, y;
+    switch (m) {
+    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_POINTERACTIVATE: return PA_NOACTIVATE;
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: on_paint(); return 0;
+    case WM_DPICHANGED: return 0;
+    case WM_LBUTTONDOWN:
+        SetCapture(h);
+        press(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+        return 0;
+    case WM_MOUSEMOVE:
+        if (drag != DR_NONE && (w & MK_LBUTTON)) move(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+        return 0;
+    case WM_LBUTTONUP:
+        if (drag != DR_NONE) release(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+        if (GetCapture() == h) ReleaseCapture();
+        return 0;
+    case WM_CAPTURECHANGED:
+        if ((HWND)l != h && drag != DR_NONE) {
+            if (drag == DR_SLIDER) commit_pending();
+            drag = DR_NONE;
+            KillTimer(h, TM_HOLD);
+        }
+        return 0;
+    case WM_POINTERDOWN:
+        if (!IS_POINTER_PRIMARY_WPARAM(w)) return 0;
+        pt_client(l, &x, &y);
+        press(x, y);
+        return 0;
+    case WM_POINTERUPDATE:
+        if (!IS_POINTER_PRIMARY_WPARAM(w)) return 0;
+        if (IS_POINTER_INCONTACT_WPARAM(w) && drag != DR_NONE) {
+            pt_client(l, &x, &y);
+            move(x, y);
+        }
+        return 0;
+    case WM_POINTERUP:
+        if (!IS_POINTER_PRIMARY_WPARAM(w)) return 0;
+        if (drag != DR_NONE) {
+            pt_client(l, &x, &y);
+            release(x, y);
+        }
+        return 0;
+    case WM_POINTERCAPTURECHANGED:
+        if (drag == DR_SLIDER) commit_pending();
+        drag = DR_NONE;
+        KillTimer(h, TM_HOLD);
+        return 0;
+    case WM_MOUSEWHEEL:
+        if (vis && !conf) {
+            scroll -= GET_WHEEL_DELTA_WPARAM(w) * S(60) / WHEEL_DELTA;
+            clamp_scroll();
+            inval();
+        }
+        return 0;
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+        if (m == WM_KEYDOWN || w == VK_F10) { key(w); return 0; }
+        break;
+    case WM_TIMER:
+        switch (w) {
+        case TM_ANIM: anim_step(); break;
+        case TM_COMMIT: commit_pending(); break;
+        case TM_TOAST: KillTimer(h, TM_TOAST); toast_on = 0; inval(); break;
+        case TM_HOLD:
+            KillTimer(h, TM_HOLD);
+            if (drag == DR_TAP) { held = 1; reset_sel(); }
+            break;
+        case TM_LIVE:
+            if (!vis) { KillTimer(h, TM_LIVE); break; }
+            update_live();
+            if (++live_n & 1) {
+                ph_backends_tick();
+                refresh_hw(1);
+            }
+            inval();
+            break;
+        }
+        return 0;
+    case WM_UI_SHOW:
+        if (w == 2) ui_toggle(); else ui_show((int)w);
+        return 0;
+    case WM_UI_NAV: ui_nav((int)w); return 0;
+    case WM_UI_REFRESH: ui_refresh(); return 0;
+    case WM_UI_TOAST:
+        if (l) { ui_toast((const wchar_t *)l); ph_free((void *)l); }
+        return 0;
+    case WM_DISPLAYCHANGE: ui_refresh(); return 0;
+    case WM_CLOSE: ui_show(0); return 0;
+    case WM_DESTROY:
+        KillTimer(h, TM_ANIM);
+        KillTimer(h, TM_LIVE);
+        KillTimer(h, TM_COMMIT);
+        KillTimer(h, TM_TOAST);
+        KillTimer(h, TM_HOLD);
+        free_bb();
+        del_fonts();
+        if (toast_hw) { DestroyWindow(toast_hw); toast_hw = NULL; }
+        if (toast_font) { DeleteObject(toast_font); toast_font = NULL; }
+        InterlockedExchange(&vis, 0);
+        hw = NULL;
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+void ui_init(HINSTANCE hi)
+{
+    ui_tid = GetCurrentThreadId();
+    WNDCLASSW wc = { 0 };
+    wc.lpfnWndProc = wndproc;
+    wc.hInstance = hi;
+    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+    wc.lpszClassName = L"PhawxON.panel";
+    RegisterClassW(&wc);
+    wc.lpfnWndProc = toast_proc;
+    wc.lpszClassName = L"PhawxON.toast";
+    RegisterClassW(&wc);
+    DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+    hw = CreateWindowExW(ex, L"PhawxON.panel", PH_APPNAME_W, WS_POPUP, 0, 0, 1, 1, NULL, NULL, hi, NULL);
+    toast_hw = CreateWindowExW(ex, L"PhawxON.toast", PH_APPNAME_W, WS_POPUP, 0, 0, 1, 1, NULL, NULL, hi, NULL);
+    lstrcpynW(live, L"", PH_ARRAY(live));
+}

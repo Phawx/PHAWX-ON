@@ -1,0 +1,33 @@
+name: build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: sudo apt-get update -q && sudo apt-get install -y -q mingw-w64 zip
+      - name: Build
+        run: make -j4 dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhawxON
+          path: dist/PhawxON-1.0.0.zip
+      - name: Release v1.0.0
+        if: contains(github.event.head_commit.message, '[release]') || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp build/PhawxON.exe dist/PhawxON.exe
+          if gh release view v1.0.0 >/dev/null 2>&1; then
+            gh release upload v1.0.0 dist/PhawxON-1.0.0.zip dist/PhawxON.exe --clobber
+          else
+            gh release create v1.0.0 dist/PhawxON-1.0.0.zip dist/PhawxON.exe \
+              --target "${{ github.sha }}" --title "Phawx ON 1.0" --notes-file RELEASE_NOTES.md
+          fi
