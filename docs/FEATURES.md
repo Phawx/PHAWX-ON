@@ -20,7 +20,7 @@ Control keys (such as `cpu.tdp`) are the names used in `phawx.ini`.
 | Overlay only on request | Yes | `src/ui.c`, `src/main.c` | Opens only from the tray, the button combo, the edge swipe or Ctrl+Alt+P. Starts hidden with `/tray`. |
 | Intel TDP (PL1/PL2) | Yes | `src/cpu/intel.c` (`cpu.tdp`, `cpu.tdpboost`) | MSR 0x610 with the real 0x606 units. Writes the whole field: enable, clamp and time window are kept. PL2 is raised to PL1 if it would end up lower. Controls hide if the BIOS locked the MSR. |
 | Intel PL1/PL2 time windows | Yes | `src/cpu/intel.c` (`cpu.pl1time`, `cpu.pl2time`) | Advanced. |
-| AMD TDP (STAPM / fast / slow / APU slow) | Yes | `src/cpu/amd.c`, `src/cpu/smu.c` | SMU mailbox through the PawnIO RyzenSMU module. Covers Raven through Strix Halo / Dragon Range / Fire Range. Keeps a separate boost (fast) limit. |
+| AMD TDP (STAPM / fast / slow / APU slow) | Yes | `src/cpu/amd.c`, `src/cpu/smu.c` | SMU mailbox through the PawnIO RyzenSMU module. Covers Raven through Strix Halo / Dragon Range / Fire Range. Keeps a separate boost (fast) limit that is never below TDP. Van Gogh, Mendocino, Dragon Range and Fire Range have no readable power table: there, Boost at Default follows TDP (as the slow limit does), and the limits are not restored on exit because their original values are unknown. |
 | AMD temperature limit | Yes | `src/cpu/amd.c` (`cpu.tctl`) | |
 | AMD STAPM / slow time constants | Yes | `src/cpu/amd.c` (`cpu.stapmtime`, `cpu.slowtime`) | Advanced. |
 | EPP | Yes | `src/sys/winpower.c` (`power.epp`, `cpu.epp_p`, `cpu.epp_e`) | Windows PERFEPP / PERFEPP1. Hybrid CPUs get a separate value per core class. Restored on exit. |
