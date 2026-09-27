@@ -189,6 +189,13 @@ static int set_mode(ph_ctl *c, int32_t v)
     return fan_apply(v, fan_ctls[F_SPEED].val);
 }
 
+/* back at Default: hand the fan to the firmware now, not on the next tick */
+static void release_mode(ph_ctl *c)
+{
+    (void)c;
+    if (fan && fan_touched) fan_apply(FM_AUTO, 0);
+}
+
 static int set_speed(ph_ctl *c, int32_t v)
 {
     (void)c;
@@ -218,7 +225,7 @@ static int fan_init(const dev_def *d)
     uint16_t fl = CF_OPTIONAL | CF_REAPPLY | CF_PROFILE | d->flags;
     fan_ctls[F_HDR] = (ph_ctl){ .key = NULL, .label = d->name, .type = CT_HEADER, .page = PG_SYSTEM, .order = 200, .flags = d->flags };
     fan_ctls[F_MODE] = (ph_ctl){ .key = "dev.fanmode", .label = L"Fan mode", .type = CT_CHOICE, .page = PG_SYSTEM,
-                                 .order = 201, .flags = fl, .choices = fan_modes, .set = set_mode };
+                                 .order = 201, .flags = fl, .choices = fan_modes, .set = set_mode, .release = release_mode };
     fan_ctls[F_SPEED] = (ph_ctl){ .key = "dev.fanspeed", .label = L"Manual fan speed", .type = CT_SLIDER, .page = PG_SYSTEM,
                                   .order = 202, .flags = (uint16_t)(CF_PROFILE | d->flags), .min = 10, .max = 100, .step = 5,
                                   .def = 50, .unit = L"%", .fmt = fmt_pct, .set = set_speed };
