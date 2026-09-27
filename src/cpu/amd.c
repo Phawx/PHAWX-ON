@@ -71,7 +71,8 @@ static int set_tdp(ph_ctl *c, int32_t mw)
     ph_ctl *b = &ctls[C_BOOST], *sl = &ctls[C_SLOW];
     int32_t fast = -1, cur;
     if (b->active) fast = b->val > mw ? b->val : mw;
-    else if (pm_mw(PM_FAST_LIM, &cur) == 0 && cur < mw) fast = mw;
+    /* a fast limit that cannot be read may be below the new one (Van Gogh ships 15/15/15 W) */
+    else if (pm_mw(PM_FAST_LIM, &cur) || cur < mw) fast = mw;
     if (fast > 0 && smu_has(S_FAST_LIMIT)) smu_apply(S_FAST_LIMIT, fast);
     if (!sl->active && smu_has(S_SLOW_LIMIT)) smu_apply(S_SLOW_LIMIT, mw);
     return fail(c, smu_apply(S_STAPM_LIMIT, mw));
