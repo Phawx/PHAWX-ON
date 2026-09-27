@@ -33,9 +33,9 @@ build/%.o: src/%.c src/phawx.h src/version.h plugins/sdk/phawx_plugin.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-build/phawx.res.o: res/phawx.rc res/phawx.ico res/phawx.manifest src/version.h $(wildcard res/pawnio/*.bin)
+build/phawx.res.o: res/phawx.rc res/phawx.ico res/phawx.manifest src/version.h $(wildcard plugins/PawnIO/modules/*.bin)
 	@mkdir -p build
-	$(WINDRES) -I res -I src -O coff -o $@ res/phawx.rc
+	$(WINDRES) -I res -I src -I plugins -O coff -o $@ res/phawx.rc
 
 build/plugins/%.res.o: plugins/%.rc
 	@mkdir -p $(dir $@)
@@ -52,10 +52,10 @@ dist: $(OUT) $(PLUGINS)
 	@grep -q 'assemblyIdentity.*version="$(VERSION).0"' res/phawx.manifest || \
 		{ echo "res/phawx.manifest does not carry version $(VERSION).0 from src/version.h" >&2; exit 1; }
 	@rm -rf dist/PhawxON
-	@mkdir -p dist/PhawxON/plugins/ryzenadj dist/PhawxON/sdk
+	@mkdir -p dist/PhawxON/plugins/ryzenadj dist/PhawxON/plugins/PawnIO/modules dist/PhawxON/sdk
 	cp $(OUT) README.md LICENSE dist/PhawxON/
-	cp res/pawnio/COPYING dist/PhawxON/LICENSE-PawnIO-Modules.txt
 	cp build/plugins/ryzenadj/ryzenadj.dll dist/PhawxON/plugins/ryzenadj/
+	cp plugins/PawnIO/modules/*.bin plugins/PawnIO/modules/README.md plugins/PawnIO/modules/COPYING dist/PhawxON/plugins/PawnIO/modules/
 	cp plugins/sdk/phawx_plugin.h plugins/example/example.c plugins/example/example.rc docs/PLUGINS.md dist/PhawxON/sdk/
 	cd dist && rm -f PhawxON-$(VERSION).zip && zip -qr PhawxON-$(VERSION).zip PhawxON
 

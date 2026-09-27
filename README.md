@@ -50,12 +50,12 @@ See [docs/FEATURES.md](docs/FEATURES.md) in the repository for the full feature 
 
 - Windows 10 21H2 or later, or Windows 11, x64. The app asks for administrator rights when it starts.
 - **PawnIO**, needed for TDP, CPU clock, AMD iGPU clock and fan control:
-  Install it from <https://pawnio.eu>. That installs the driver and `PawnIOLib.dll`, and nothing else is needed: PawnIO's installer ships no modules, so the signed modules Phawx ON uses are built into `PhawxON.exe` (from [PawnIO.Modules](https://github.com/namazso/PawnIO.Modules) 0.2.11, LGPL-2.1, see `res/pawnio/` and `LICENSE-PawnIO-Modules.txt` in the zip):
+  Install it from <https://pawnio.eu>. That installs the driver and `PawnIOLib.dll`, and nothing else is needed. PawnIO's installer ships no modules, so Phawx ON brings the signed ones it uses, from [PawnIO.Modules](https://github.com/namazso/PawnIO.Modules) 0.2.11 (LGPL-2.1), in `plugins\PawnIO\modules\` next to `PhawxON.exe`:
   - Intel: `IntelMSR.bin`, `IntelMCHBAR.bin`
   - AMD: `AMDFamily17.bin`, `RyzenSMU.bin`
   - Fan: `LpcACPIEC.bin`
 
-  A file with the same name in PawnIO's install folder (`C:\Program Files\PawnIO\` or its `modules\` folder), or next to `PhawxON.exe` (or in its `modules\` folder), is used only if PawnIO does not accept the built-in module.
+  To update them, copy newer files from the [PawnIO.Modules releases](https://github.com/namazso/PawnIO.Modules/releases) into that folder; the `README.md` there explains how. Phawx ON loads each module from that folder first. If one is missing there, it uses the copy built into `PhawxON.exe`, and after that PawnIO's own folder (`C:\Program Files\PawnIO\` or its `modules\`).
 
   The driver only runs code signed by the PawnIO project. Phawx ON can therefore only do what those modules allow. On Intel this means the power limit (0x610) is available, but turbo ratios and HWP MSRs are not. Without PawnIO, the Windows power, GPU vendor API and display controls still work. The **Plugins** page shows whether PawnIO is running, with its version, and links to the download.
 - **Intel PresentMon** (only needed for AutoTDP and the FPS readout): install PresentMon 2.x from <https://game.intel.com/story/intel-presentmon/> or [GitHub](https://github.com/GameTechDev/PresentMon/releases). Phawx ON uses the PresentMon service and its `PresentMonAPI2.dll`. It only loads that DLL from under Program Files, and starts the service if it is stopped.

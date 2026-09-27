@@ -1,7 +1,7 @@
 Phawx ON 1.1.1
 
 Fixed in 1.1.1
-- **PawnIO showed "modules are missing" after installing PawnIO.** PawnIO's installer only installs the driver; programs are meant to bring the modules they use. Phawx ON now has the signed modules it needs (IntelMSR, IntelMCHBAR, AMDFamily17, RyzenSMU, LpcACPIEC from PawnIO.Modules 0.2.11) built in, so installing PawnIO from pawnio.eu is all that is needed. Module files you placed yourself are only used if PawnIO does not accept the built-in ones.
+- **PawnIO showed "modules are missing" after installing PawnIO.** PawnIO's installer only installs the driver; programs are meant to bring the modules they use. Phawx ON now ships the signed modules it needs (IntelMSR, IntelMCHBAR, AMDFamily17, RyzenSMU, LpcACPIEC from PawnIO.Modules 0.2.11) in `plugins\PawnIO\modules\`, with a copy built into the exe, so installing PawnIO from pawnio.eu is all that is needed. To update the modules later, copy newer ones from the PawnIO.Modules releases into that folder; its README explains how.
 - **AMD: TDP above the firmware's boost limit had no effect** on APUs without a readable power table (Van Gogh, Mendocino, Dragon Range, Fire Range). Boost at Default now follows TDP there.
 
 Phawx ON 1.1
@@ -23,6 +23,6 @@ Changed
 Fixed
 - The crash handler now runs. In 1.0 it never did, so a crash could leave TDP and clock limits in place until reboot. After a crash they are now restored, also when the crash is in a plugin.
 
-Install: extract the zip to `C:\Program Files\`, so the app is in `C:\Program Files\PhawxON\`. Requirements: [PawnIO](https://pawnio.eu) for hardware control (its modules are built into Phawx ON), and [Intel PresentMon](https://game.intel.com/story/intel-presentmon/) for AutoTDP. See the README for details.
+Install: extract the zip to `C:\Program Files\`, so the app is in `C:\Program Files\PhawxON\`. Requirements: [PawnIO](https://pawnio.eu) for hardware control (its modules come with Phawx ON), and [Intel PresentMon](https://game.intel.com/story/intel-presentmon/) for AutoTDP. See the README for details.
 
 Not yet tested on real hardware. Please report issues.

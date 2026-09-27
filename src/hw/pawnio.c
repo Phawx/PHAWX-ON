@@ -103,12 +103,44 @@ static int load_blob(int m, const UCHAR *blob, DWORD n)
     return -1;
 }
 
-/* The PawnIO installer ships no modules: programs bring their own, so the signed
-   ones Phawx ON uses are built in (res/pawnio). A file of the same name on disk is
-   the fallback for when PawnIO does not accept the built-in one. */
+/* 0 loaded, 1 no such file, -1 unreadable or rejected by PawnIO */
+static int load_path(int m, const wchar_t *path)
+{
+    DWORD a = GetFileAttributesW(path);
+    if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) return 1;
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return -1;
+    LARGE_INTEGER sz;
+    UCHAR *blob = NULL;
+    DWORD got = 0;
+    int rc = -1;
+    if (GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && sz.QuadPart < (4 << 20) &&
+        (blob = ph_alloc((size_t)sz.QuadPart)) != NULL &&
+        ReadFile(f, blob, (DWORD)sz.QuadPart, &got, NULL) && got == (DWORD)sz.QuadPart)
+        rc = load_blob(m, blob, got);
+    ph_free(blob);
+    CloseHandle(f);
+    if (rc) ph_log("pawnio: %ls rejected", path);
+    return rc;
+}
+
+/* The PawnIO installer ships no modules; programs bring their own. Phawx ON's are
+   in plugins\PawnIO\modules next to the exe, where newer ones can be dropped in
+   (see the README there). A copy is also built into the exe for when that folder
+   is missing, and PawnIO's own folder is the last resort. */
 static void load_module(int m, const wchar_t *file)
 {
-    wchar_t name[40] = L"PAWNIO_", path[MAX_PATH];
+    wchar_t path[MAX_PATH], name[40] = L"PAWNIO_";
+    int rc = 1;
+    if (exe_dir(path)) {
+        size_t n = wcslen(path);
+        if (ph_swprintf(path + n, MAX_PATH - (int)n, L"plugins\\PawnIO\\modules\\%s", file) >= 0 &&
+            (rc = load_path(m, path)) == 0) {
+            ph_log("pawnio: %ls from plugins\\PawnIO\\modules", file);
+            return;
+        }
+    }
+
     int k = 7;
     for (const wchar_t *c = file; *c && *c != L'.' && k < PH_ARRAY(name) - 1; c++)
         name[k++] = *c >= L'a' && *c <= L'z' ? (wchar_t)(*c - 32) : *c;
@@ -117,23 +149,21 @@ static void load_module(int m, const wchar_t *file)
     HGLOBAL g = r ? LoadResource(NULL, r) : NULL;
     const UCHAR *res = g ? LockResource(g) : NULL;
     DWORD rn = r ? SizeofResource(NULL, r) : 0;
-    if (res && rn && load_blob(m, res, rn) == 0) return;
-    if (res) ph_log("pawnio: built-in %ls rejected", file);
-
-    if (!find_file(file, path)) { if (!res) ph_log("pawnio: %ls not found", file); return; }
-    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (f == INVALID_HANDLE_VALUE) return;
-    LARGE_INTEGER sz;
-    UCHAR *blob = NULL;
-    DWORD got = 0;
-    if (GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && sz.QuadPart < (4 << 20) &&
-        (blob = ph_alloc((size_t)sz.QuadPart)) != NULL &&
-        ReadFile(f, blob, (DWORD)sz.QuadPart, &got, NULL) && got == (DWORD)sz.QuadPart) {
-        if (load_blob(m, blob, got) == 0) ph_log("pawnio: %ls loaded from %ls", file, path);
-        else ph_log("pawnio: %ls rejected", path);
+    if (res && rn) {
+        if (load_blob(m, res, rn) == 0) {
+            ph_log("pawnio: %ls from the copy built into Phawx ON", file);
+            return;
+        }
+        ph_log("pawnio: built-in %ls rejected", file);
+        rc = -1;
     }
-    ph_free(blob);
-    CloseHandle(f);
+
+    if (find_file(file, path)) {
+        int r2 = load_path(m, path);
+        if (r2 == 0) { ph_log("pawnio: %ls loaded from %ls", file, path); return; }
+        if (r2 < 0) rc = -1;
+    }
+    if (rc > 0) ph_log("pawnio: %ls not found", file);
 }
 
 static void pio_close(void)

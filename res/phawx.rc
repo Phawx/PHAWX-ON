@@ -4,12 +4,13 @@
 1 ICON "phawx.ico"
 1 24 "phawx.manifest"
 
-/* signed PawnIO modules (res/pawnio/README.md); the installer does not ship any */
-PAWNIO_INTELMSR    RCDATA "pawnio/IntelMSR.bin"
-PAWNIO_INTELMCHBAR RCDATA "pawnio/IntelMCHBAR.bin"
-PAWNIO_AMDFAMILY17 RCDATA "pawnio/AMDFamily17.bin"
-PAWNIO_RYZENSMU    RCDATA "pawnio/RyzenSMU.bin"
-PAWNIO_LPCACPIEC   RCDATA "pawnio/LpcACPIEC.bin"
+/* A copy of the signed PawnIO modules from plugins/PawnIO/modules (see the README
+   there), used when that folder is missing next to the exe */
+PAWNIO_INTELMSR    RCDATA "PawnIO/modules/IntelMSR.bin"
+PAWNIO_INTELMCHBAR RCDATA "PawnIO/modules/IntelMCHBAR.bin"
+PAWNIO_AMDFAMILY17 RCDATA "PawnIO/modules/AMDFamily17.bin"
+PAWNIO_RYZENSMU    RCDATA "PawnIO/modules/RyzenSMU.bin"
+PAWNIO_LPCACPIEC   RCDATA "PawnIO/modules/LpcACPIEC.bin"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION PH_VER_MAJOR,PH_VER_MINOR,PH_VER_PATCH,0
