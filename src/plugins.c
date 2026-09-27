@@ -1,4 +1,5 @@
 #include "phawx.h"
+#define PHX_HOST             /* the SDK header's phx_plugin_init declaration is for plugins */
 #include "phawx_plugin.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -248,7 +249,7 @@ static int key_taken(phx_plugin *p, const char *full)
 static int PHX_CALL h_add_control(phx_plugin *p, phx_control *c)
 {
     if (!p || !p->initing) return reject(p, "control", "added outside phx_plugin_init");
-    if (!c || c->size < sizeof(phx_control)) return reject(p, "control", "bad size");
+    if (!c || c->size < PHX_CONTROL_SIZE_V1) return reject(p, "control", "bad size");
     if (p->nctl >= MAX_PCTL) return reject(p, "control", "too many controls");
     if (c->type > PHX_HEADER || c->page > PHX_PAGE_PLUGINS || !c->label) return reject(p, "control", "bad type, page or label");
     int setting = c->type <= PHX_ACTION;
@@ -351,6 +352,7 @@ static void PHX_CALL h_update(phx_plugin *p, phx_control *c)
 static int k_set_max(ph_clk *d, int mhz) { KCALL(w->pub->set_max(w->pub, mhz), 1); }
 static int k_set_min(ph_clk *d, int mhz) { KCALL(w->pub->set_min(w->pub, mhz), 1); }
 static int k_reset(ph_clk *d)            { KCALL(w->pub->reset(w->pub), 0); }
+static int k_uncap(ph_clk *d)            { KCALL(w->pub->set_max(w->pub, w->pub->max_mhz), 0); }   /* no reset of its own */
 static int k_cur(ph_clk *d, int *mhz)    { KCALL(w->pub->cur(w->pub, mhz), -1); }
 static int k_util(ph_clk *d, int *pct)   { KCALL(w->pub->util(w->pub, pct), -1); }
 #undef KCALL
@@ -358,7 +360,7 @@ static int k_util(ph_clk *d, int *pct)   { KCALL(w->pub->util(w->pub, pct), -1);
 static int PHX_CALL h_add_clock(phx_plugin *p, phx_clock *d)
 {
     if (!p || !p->initing) return reject(p, "clock", "added outside phx_plugin_init");
-    if (!d || d->size < sizeof(phx_clock) || d->kind > PHX_CLOCK_GPU || !d->set_max) return reject(p, "clock", "bad struct");
+    if (!d || d->size < PHX_CLOCK_SIZE_V1 || d->kind > PHX_CLOCK_GPU || !d->set_max) return reject(p, "clock", "bad struct");
     if (d->min_mhz < 0 || d->max_mhz <= d->min_mhz || d->max_mhz > 20000) return reject(p, "clock", "bad range");
     if (p->nclk >= MAX_PCAP) return reject(p, "clock", "too many clocks");
     pclk *w = ph_alloc(sizeof *w);
@@ -371,7 +373,7 @@ static int PHX_CALL h_add_clock(phx_plugin *p, phx_clock *d)
     w->c.step_mhz = d->step_mhz > 0 ? d->step_mhz : 50;
     w->c.set_max = k_set_max;
     w->c.set_min = d->set_min ? k_set_min : NULL;
-    w->c.reset = d->reset ? k_reset : NULL;
+    w->c.reset = d->reset ? k_reset : k_uncap;
     w->c.cur = d->cur ? k_cur : NULL;
     w->c.util = d->util ? k_util : NULL;
     w->c.ctx = w;
@@ -432,7 +434,7 @@ static int PHX_CALL h_add_fan(phx_plugin *p, phx_fan *f)
 {
     char km[KEY_MAX], ks[KEY_MAX];
     if (!p || !p->initing) return reject(p, "fan", "added outside phx_plugin_init");
-    if (!f || f->size < sizeof(phx_fan) || !f->id || !valid_key(f->id) || !f->set_auto || !f->set_duty)
+    if (!f || f->size < PHX_FAN_SIZE_V1 || !f->id || !valid_key(f->id) || !f->set_auto || !f->set_duty)
         return reject(p, "fan", "bad struct");
     if (p->nfan >= MAX_PCAP) return reject(p, "fan", "too many fans");
     ph_snprintf(km, sizeof km, "%s.%s.mode", p->id, f->id);
@@ -530,7 +532,7 @@ static int PHX_CALL h_add_rgb(phx_plugin *p, phx_rgb *l)
 {
     char km[KEY_MAX], kc[KEY_MAX], kb[KEY_MAX];
     if (!p || !p->initing) return reject(p, "rgb", "added outside phx_plugin_init");
-    if (!l || l->size < sizeof(phx_rgb) || !l->id || !valid_key(l->id) || !l->apply || !l->restore)
+    if (!l || l->size < PHX_RGB_SIZE_V1 || !l->id || !valid_key(l->id) || !l->apply || !l->restore)
         return reject(p, "rgb", "bad struct");
     if (p->nrgb >= MAX_PCAP) return reject(p, "rgb", "too many lights");
     ph_snprintf(km, sizeof km, "%s.%s.mode", p->id, l->id);
@@ -583,12 +585,13 @@ static int PHX_CALL h_cfg_get_int(phx_plugin *p, const char *key, int def)
     return cfg_get_int(s, key, def);
 }
 
-static void PHX_CALL h_cfg_set_int(phx_plugin *p, const char *key, int v)
+static int PHX_CALL h_cfg_set_int(phx_plugin *p, const char *key, int v)
 {
-    char s[48];
-    if (!p || !key || !valid_key(key)) return;
+    char s[48], b[16];
+    if (!p || !key || !valid_key(key)) return reject(p, "config key", "bad key");
     cfg_sec(p, s, sizeof s);
-    cfg_set_int(s, key, v);
+    ph_snprintf(b, sizeof b, "%d", v);
+    return cfg_set_str(s, key, b) ? reject(p, key, "not written") : PHX_OK;
 }
 
 static int PHX_CALL h_cfg_get_str(phx_plugin *p, const char *key, char *out, int n)
@@ -602,15 +605,15 @@ static int PHX_CALL h_cfg_get_str(phx_plugin *p, const char *key, char *out, int
 }
 
 /* values over 511 characters are refused, not written empty */
-static void PHX_CALL h_cfg_set_str(phx_plugin *p, const char *key, const char *v)
+static int PHX_CALL h_cfg_set_str(phx_plugin *p, const char *key, const char *v)
 {
     char s[48];
-    if (!p || !key || !valid_key(key)) return;
+    if (!p || !key || !valid_key(key)) return reject(p, "config key", "bad key");
     /* a line break would let a value write its own ini lines */
     for (const char *c = v; c && *c; c++)
-        if (*c == '\r' || *c == '\n') { reject(p, key, "line break in the value"); return; }
+        if (*c == '\r' || *c == '\n') return reject(p, key, "line break in the value");
     cfg_sec(p, s, sizeof s);
-    if (cfg_set_str(s, key, v)) reject(p, key, "value too long");
+    return cfg_set_str(s, key, v) ? reject(p, key, "value too long") : PHX_OK;
 }
 
 static void PHX_CALL h_log(phx_plugin *p, const char *msg)
@@ -685,7 +688,7 @@ static int pe_is_plugin(const wchar_t *path, int *is64)
             ddoff = (DWORD)offsetof(IMAGE_OPTIONAL_HEADER64, DataDirectory);
             if (ohsz < ddoff + sizeof(IMAGE_DATA_DIRECTORY)) goto out;
             ndd = ((const IMAGE_OPTIONAL_HEADER64 *)oh)->NumberOfRvaAndSizes;
-            *is64 = fh->Machine == IMAGE_FILE_MACHINE_AMD64;
+            *is64 = fh->Machine == IMAGE_FILE_MACHINE_AMD64 ? 1 : 2;   /* 2: ARM64 or another CPU */
         } else if (*(const WORD *)oh == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
             ddoff = (DWORD)offsetof(IMAGE_OPTIONAL_HEADER32, DataDirectory);
             if (ohsz < ddoff + sizeof(IMAGE_DATA_DIRECTORY)) goto out;
@@ -855,6 +858,7 @@ static int reserved_id(const char *id)
 static int loadable(phx_plugin *p)
 {
     const wchar_t *why = !p->is64 ? L"built for 32-bit Windows, needs a 64-bit build" :
+                         p->is64 != 1 ? L"not built for x64 Windows, needs an x64 build" :
                          reserved_id(p->id) ? L"its file name is reserved, rename it" : NULL;
     if (why) {
         p->state = PS_INVALID;

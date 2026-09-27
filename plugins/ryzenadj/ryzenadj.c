@@ -423,7 +423,7 @@ PHX_EXPORT int PHX_CALL phx_plugin_init(const phx_host *host, phx_plugin *self, 
     int32_t dummy, hi = 0;
     H = host;
     SELF = self;
-    if (host->version < PHX_API_VERSION) return PHX_E_VERSION;
+    if (host->version < 1) return PHX_E_VERSION;         /* nothing newer than API 1 is used */
     const phx_platform *pf = host->platform;
     if (pf->vendor != 2) { host->set_status(self, L"needs an AMD Ryzen APU"); return PHX_UNSUPPORTED; }
     /* Phawx ON's own SMU control is the safer path; two tools on one limit would fight */

@@ -4,23 +4,23 @@ Phawx ON is a small, open-source performance tuning app for Windows handhelds an
 
 It is built to be a good citizen:
 
-- Hardware access goes only through the **signed PawnIO driver and its signed modules**.
+- Hardware access goes only through the **signed PawnIO driver and its signed modules**. The one exception is the optional RyzenAdj plugin, which is off unless you turn it on (see [Plugins](#plugins)).
 - Frame data comes only from **Intel PresentMon**. It does not inject into or hook games.
 - The overlay appears only when you ask for it.
 - It never turns off security features: no HVCI, driver blocklist, VBS or Defender changes.
 - No undervolting.
 - Changes are reverted when the app exits or crashes, and reapplied after sleep.
 
-See [docs/FEATURES.md](docs/FEATURES.md) for the full feature matrix, including what is not supported and why.
+See [docs/FEATURES.md](docs/FEATURES.md) in the repository for the full feature matrix, including what is not supported and why.
 
 > Hardware behaviour cannot be tested in CI. Every hardware control starts at **Default**, which means Phawx ON leaves that setting alone until you change it.
 
 ## Features
 
 - **Overlay.** Slides in from the right edge, and gamepad, touch and mouse all work in it. The header reads **Phawx ON** (green) while AutoTDP runs and **Phawx OFF** otherwise, with live FPS and clocks below it. Pages: Quick, CPU, Power, GPU, Display, System, Plugins, Settings.
-- **Pins.** Every setting has a pin. Pinned settings appear on the Quick page, below its own rows.
+- **Pins.** Every setting and action has a pin, except those on the Quick page itself and the Plugins page's own switches and links. Pinned ones appear on the Quick page, below its own rows.
 - **Hold to reset.** Hold X or R on a setting for half a second (or touch and hold it for 2 seconds) to put it back to Default.
-- **Plugins.** DLLs in a `plugins` folder add controls, clock domains, fans and RGB lights. The Plugins page also shows whether PawnIO and PresentMon are installed and running. A RyzenAdj plugin is included. See [docs/PLUGINS.md](docs/PLUGINS.md).
+- **Plugins.** DLLs in a `plugins` folder add controls, clock domains, fans and RGB lights. The Plugins page also shows whether PawnIO and PresentMon are installed and running. A RyzenAdj plugin is included. The plugin guide is [docs/PLUGINS.md](docs/PLUGINS.md) in the repository and `sdk\PLUGINS.md` in the release zip.
 - **TDP.**
   - Intel: PL1/PL2 and their time windows, through MSR 0x610 with the real power units.
   - AMD Ryzen APUs (Raven through Strix Halo): sustained, boost, slow and APU slow limits, time constants and temperature limit, through the SMU.
@@ -63,7 +63,7 @@ See [docs/FEATURES.md](docs/FEATURES.md) for the full feature matrix, including 
 ## Install
 
 1. Download `PhawxON-1.1.0.zip` from [Releases](https://github.com/Phawx/PHAWX-ON/releases).
-2. Extract it to **`C:\Program Files\PhawxON\`**. "Start with Windows" and plugins only work from there, because an app that runs elevated must never load anything from a folder that normal users can write to.
+2. Extract it to **`C:\Program Files\`**. The zip contains a `PhawxON` folder, so the app ends up in `C:\Program Files\PhawxON\PhawxON.exe`. "Start with Windows" and plugins only work under Program Files, because an app that runs elevated must never load anything from a folder that normal users can write to.
 3. Install PawnIO with its modules, and PresentMon if you want AutoTDP (see above).
 4. Run `PhawxON.exe`.
 5. Optional: turn on **Settings → Start with Windows**. This creates a logon task that starts Phawx ON hidden in the tray (`/tray`).
@@ -74,6 +74,7 @@ To uninstall:
 1. Turn off Start with Windows.
 2. Exit Phawx ON from the tray. It restores every setting it changed.
 3. Delete the folder.
+4. Only if you turned on the RyzenAdj plugin's *Read power table*: remove the InpOut driver it installed (`sc delete inpoutx64` as administrator, restart, then delete `C:\Windows\System32\drivers\inpoutx64.sys`).
 
 ## Using it
 
@@ -96,9 +97,11 @@ The overlay never takes focus from the game.
 | D-pad left/right | Drag the slider | Change the value |
 | A | Tap | Toggle or run the selected item |
 | LB / RB | Tap a tab | Switch page |
-| Hold X (the left face button) or R on the keyboard, about half a second | Touch and hold for 2 seconds (mouse: half a second) | Reset the row to **Default** (Phawx ON stops managing it). A bar under the row shows the progress. |
-| Y (the top face button) | Tap the pin at the left of the row | Pin the setting to the Quick page, or unpin it |
+| Hold X (the left face button) or R on the keyboard, about half a second | Touch and hold for 2 seconds (mouse: half a second) | Reset the setting to **Default** (Phawx ON stops managing it). A bar under the row shows the progress. |
+| Y (the top face button) | Tap the pin at the left of the row (on a slider, on its label line) | Pin the setting to the Quick page, or unpin it |
 | B | - | Close the menu |
+
+Holding only resets saved settings. On a setting that is already at Default it just says *Already at Default*, and on a row locked by AutoTDP *Managed by AutoTDP*. On actions, links and the plugin switches a long press is an ordinary tap. A touch or click that moves more than about 10 pixels is not a tap or a hold: moving up or down scrolls, moving sideways cancels. Windows' own press-and-hold ring, pen feedback and flicks are turned off in the overlay.
 
 Changes take effect about half a second after you stop adjusting. Settings marked dangerous ask for confirmation first. Advanced options are hidden until you turn on **Settings → Show advanced options**.
 
@@ -106,7 +109,7 @@ The overlay never takes keyboard focus from the game, so while it is open Phawx 
 
 ### Pins
 
-Pinned settings are listed on the Quick page under **Pinned**, in the order you pinned them, with the page and section they come from. They are saved in `phawx.ini` (`[pins]`). A pin on a setting that is currently unavailable, such as one from a plugin that is off, is kept and comes back with the setting.
+Pinned settings are listed on the Quick page under **Pinned**, in the order you pinned them, with the page and section they come from. They are saved in `phawx.ini` (`[pins]`), up to 64. A pin on a setting that is currently unavailable, such as one from a plugin that is off, is kept and comes back with the setting.
 
 ### AutoTDP
 
@@ -134,11 +137,16 @@ The **Plugins** page starts with the status of the two components Phawx ON relie
 - PawnIO, for hardware access;
 - PresentMon, for FPS.
 
-Each shows *… is loaded and running* in green, or a red ✗ with what is wrong and a **Download** link to the official site.
+Each shows *… is loaded and running* in green, or a red ✗ with what is wrong (*PawnIO driver is not running*, *PawnIO modules are missing*, *PresentMon service is not running*, *… is not installed*) and a **Download** link to the official site. *Checking PresentMon…* shows for a moment after Phawx ON starts.
 
-Below that is every plugin found in the `plugins` folder next to `PhawxON.exe`, with an on/off switch and whether it is running. Plugins are off until you turn them on, and changes apply after **Restart Phawx ON to apply**. A plugin that crashes Phawx ON is turned off automatically at the next start. To write one, see [docs/PLUGINS.md](docs/PLUGINS.md).
+Below that is every plugin found in the `plugins` folder next to `PhawxON.exe`, with an on/off switch and a status line: *Running*, *Not running*, or *Not running · …* with the reason. Plugins are off until you turn them on; turning one on asks first, because plugins run with administrator rights and full hardware access. Changes apply at the next start: use **Restart Phawx ON to apply**. Plugins only run when Phawx ON is under Program Files; anywhere else they show *install Phawx ON in Program Files*. A plugin that crashes or hangs Phawx ON is turned off automatically at the next start, and Phawx ON still restores the hardware. To write one, see the plugin guide: [docs/PLUGINS.md](docs/PLUGINS.md) in the repository, `sdk\PLUGINS.md` in the zip, next to the SDK header and an example plugin.
 
-The zip includes the **RyzenAdj** plugin (`plugins\ryzenadj\`). It sets AMD APU power limits through RyzenAdj's `libryzenadj.dll` on machines where PawnIO's SMU access does not work. It needs RyzenAdj's Windows release files copied next to it, and its drivers may be blocked by Windows. See [docs/PLUGINS.md](docs/PLUGINS.md#the-ryzenadj-plugin).
+The zip includes the **RyzenAdj** plugin (`plugins\ryzenadj\`), off by default. It sets AMD APU power limits through RyzenAdj's `libryzenadj.dll` on machines where Phawx ON's own SMU control through PawnIO does not work, and stands down where it does. It needs RyzenAdj's Windows release files copied next to it. Be aware of what it brings:
+- It uses the WinRing0 driver instead of PawnIO. While the plugin runs, **any program on this PC can use that driver to take full control of it.** Windows may block the driver.
+- Its optional *Read power table* setting also installs the InpOut driver, which has the same problem, **stays installed after Phawx ON exits** and loads at every boot until you remove it.
+- Without *Read power table* (or on CPUs whose table cannot be read), the limits it sets are not read back or restored when Phawx ON exits.
+
+See the RyzenAdj section of the plugin guide for setup, the risks and how to remove InpOut.
 
 ## Build
 
@@ -146,11 +154,11 @@ You need `x86_64-w64-mingw32-gcc` and `windres` from mingw-w64 (Debian/Ubuntu: `
 
 ```sh
 make -j8        # build/PhawxON.exe and the plugins in build/plugins/
-make dist       # dist/PhawxON-<version>.zip, with plugins\ryzenadj and sdk\
+make dist       # dist/PhawxON-<version>.zip: PhawxON\ with plugins\ryzenadj and sdk\
 make clean
 ```
 
-The build uses `-Wall -Wextra` and should produce no warnings. The version is set in one place, `src/version.h`. `.github/workflows/release.yml` builds the zip and publishes the GitHub release for that version when you trigger it manually.
+The build uses `-Wall -Wextra` and should produce no warnings. The version is set in `src/version.h`; `res/phawx.manifest` repeats it, and `make dist` fails if the two differ. `.github/workflows/release.yml` builds the zip and publishes the GitHub release `v<version>` with `RELEASE_NOTES.md` when you run it manually on `main`. It refuses to publish if that tag already exists on a different commit.
 
 ## Adding a hardware backend
 
@@ -196,8 +204,8 @@ ph_backend bk_mygpu = { "mygpu", L"My GPU", BK_GPU, probe, init, shutdown, NULL,
   - Set `CF_HIDDEN` on anything you can't read.
   - Register your controls and clock domains.
 - **`shutdown`**: undo every change you made. It runs on exit, on logoff and from the crash handler.
-- **`resume`** (optional): runs after sleep. Controls flagged `CF_REAPPLY` are also reapplied automatically.
-- **`tick`** (optional): runs about once a second while the menu is open. Keep it cheap.
+- **`resume`** (optional): runs after sleep. Every control away from Default is then applied again automatically (also on AC/DC changes and profile switches), so `set` must be idempotent.
+- **`tick`** (optional): runs about once a second while the menu is open, and after every such re-apply. Keep it cheap.
 - **Hardware access**: go only through `drv_*` (PawnIO) or an official vendor API. Load vendor DLLs with `LOAD_LIBRARY_SEARCH_SYSTEM32`, or from Program Files only.
 - **Clock domains**: `ph_clk` domains with higher `prio` win. AutoTDP uses the best CPU domain and the selected GPU domain. `util` (busy %) improves bottleneck detection.
 

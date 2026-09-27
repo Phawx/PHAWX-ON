@@ -1,6 +1,8 @@
 #include <winver.h>
 
-/* FileDescription is the name Phawx ON shows for the plugin before it runs */
+/* FileDescription is the name Phawx ON shows for the plugin before it runs.
+   Change these strings (and the file name) for your own plugin: they are what
+   the user sees when deciding whether to turn it on. */
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 1,0,0,0
 PRODUCTVERSION 1,0,0,0
@@ -18,6 +20,10 @@ BEGIN
       VALUE "OriginalFilename", "example.dll"
       VALUE "ProductName", "Phawx ON example plugin"
       VALUE "ProductVersion", "1.0"
+      /* Optional: a warning Phawx ON adds to the question it asks before turning
+         the plugin on (at most 319 characters), for example:
+      VALUE "PhawxWarning", "Uses the XYZ driver, which any program on this PC can use while the plugin runs."
+      */
     END
   END
   BLOCK "VarFileInfo"

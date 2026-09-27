@@ -46,8 +46,11 @@ build/plugins/%.dll: plugins/%.c build/plugins/%.res.o plugins/sdk/phawx_plugin.
 
 plugins: $(PLUGINS)
 
-# the zip ships the RyzenAdj plugin (off until turned on) and the SDK
+# the zip ships the RyzenAdj plugin (off until turned on) and the SDK, with the
+# plugin guide as sdk/PLUGINS.md
 dist: $(OUT) $(PLUGINS)
+	@grep -q 'assemblyIdentity.*version="$(VERSION).0"' res/phawx.manifest || \
+		{ echo "res/phawx.manifest does not carry version $(VERSION).0 from src/version.h" >&2; exit 1; }
 	@rm -rf dist/PhawxON
 	@mkdir -p dist/PhawxON/plugins/ryzenadj dist/PhawxON/sdk
 	cp $(OUT) README.md LICENSE dist/PhawxON/

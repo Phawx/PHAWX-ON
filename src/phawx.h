@@ -34,7 +34,7 @@ enum { TONE_DIM, TONE_GOOD, TONE_BAD };
 
 enum {
     CF_NOSAVE    = 1 << 0,  /* never persisted */
-    CF_REAPPLY   = 1 << 1,  /* reapply after resume / periodically */
+    CF_REAPPLY   = 1 << 1,  /* only for ph_apply_all(1), which nothing calls: ph_apply_all(0) re-applies every active row */
     CF_OPTIONAL  = 1 << 2,  /* "Default" position = leave hardware untouched */
     CF_ADVANCED  = 1 << 3,  /* hidden unless advanced mode */
     CF_DANGER    = 1 << 4,  /* confirm before applying */
@@ -62,7 +62,7 @@ struct ph_ctl {
     uint16_t           flags;
     int32_t            min, max, step, def;
     const wchar_t     *unit;
-    const wchar_t     *desc;      /* optional sub-label under the row */
+    const wchar_t     *desc;      /* optional: the confirmation text of a CF_DANGER / CF_CONFIRM row (not shown otherwise) */
     const wchar_t *const *choices; /* CT_CHOICE labels, NULL terminated */
     ph_get_fn          get;       /* optional: read current hardware value */
     ph_set_fn          set;       /* apply value; returns 0 on success */
@@ -103,7 +103,7 @@ typedef struct ph_backend {
     int  (*init)(void);           /* register controls/clock domains; 0 = ok */
     void (*shutdown)(void);       /* restore anything that must not persist */
     void (*resume)(void);         /* optional: after sleep */
-    void (*tick)(void);           /* optional: called ~1 Hz while menu visible */
+    void (*tick)(void);           /* optional: called ~1 Hz while menu visible, and at the end of ph_apply_all */
     volatile LONG alive;
 } ph_backend;
 

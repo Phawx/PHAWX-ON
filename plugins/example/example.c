@@ -1,11 +1,22 @@
 /* Example Phawx ON plugin: a simulated fan, simulated RGB lights and one control.
  *
- * It touches no hardware, so it is safe to try: turn it on in the Plugins page,
- * restart Phawx ON, and the rows show up under System and Plugins. Use it as a
- * template: replace the sim_* functions with real EC or HID access.
+ * It touches no hardware, so it is safe to try: copy example.dll into the plugins
+ * folder next to PhawxON.exe, turn it on in the Plugins page, restart Phawx ON,
+ * and the rows show up under System and Plugins. Use it as a template: replace
+ * the sim_* functions with real EC or HID access, and change the names in
+ * example.rc.
  *
- *   x86_64-w64-mingw32-gcc -shared -O2 -I../sdk example.c -o example.dll
- *   cl /LD /O2 /I..\sdk example.c
+ * Build it in the sdk\ folder of the release zip, where phawx_plugin.h,
+ * example.c and example.rc sit side by side. (In the repository, run the same
+ * commands in plugins/example with -I../sdk instead of -I., or run make plugins.)
+ *
+ *   MinGW-w64:
+ *     x86_64-w64-mingw32-windres -O coff example.rc -o example.res.o
+ *     x86_64-w64-mingw32-gcc -shared -O2 -static-libgcc -I. example.c example.res.o -o example.dll
+ *
+ *   Visual Studio (x64 Native Tools prompt):
+ *     rc /nologo example.rc
+ *     cl /LD /O2 /I. example.c example.res
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -92,7 +103,7 @@ static void PHX_CALL state_fmt(const phx_control *c, int32_t v, wchar_t *b, int 
 static phx_control ctls[] = {
     { .size = sizeof(phx_control), .type = PHX_HEADER, .label = L"Example plugin", .page = PHX_PAGE_PLUGINS, .order = 0 },
     { .size = sizeof(phx_control), .type = PHX_TOGGLE, .key = "quiet", .label = L"Quiet mode (does nothing)",
-      .page = PHX_PAGE_PLUGINS, .order = 1, .flags = PHX_F_PROFILE, .set = quiet_set },
+      .page = PHX_PAGE_PLUGINS, .flags = PHX_F_PROFILE, .order = 1, .set = quiet_set },
     { .size = sizeof(phx_control), .type = PHX_INFO, .label = L"Simulated state", .page = PHX_PAGE_PLUGINS,
       .order = 2, .fmt = state_fmt },
 };
@@ -101,7 +112,8 @@ static phx_control ctls[] = {
 
 static void PHX_CALL tick(void)
 {
-    /* runs about once a second while the overlay is open */
+    /* runs about once a second while the overlay is open, and when Phawx ON
+       applies saved settings again (start, after sleep, AC/DC, game profiles) */
 }
 
 static void PHX_CALL on_shutdown(void)
@@ -115,11 +127,15 @@ static const phx_info info = {
     .size = sizeof(phx_info), .name = L"Example device", .version = L"1.0", .shutdown = on_shutdown, .tick = tick,
 };
 
+/* the oldest host API this plugin works with: compare against what you use, not
+   PHX_API_VERSION, so a rebuild with a newer SDK still runs on older hosts */
+#define NEEDS_API 1
+
 PHX_EXPORT int PHX_CALL phx_plugin_init(const phx_host *host, phx_plugin *self, const phx_info **out)
 {
     H = host;
     SELF = self;
-    if (host->version < PHX_API_VERSION) return PHX_E_VERSION;
+    if (host->version < NEEDS_API) return PHX_E_VERSION;
     /* a real plugin checks for its device first, e.g.
        if (lstrcmpiW(host->platform->maker, L"GPD")) return PHX_UNSUPPORTED; */
     for (int i = 0; i < (int)(sizeof ctls / sizeof ctls[0]); i++)

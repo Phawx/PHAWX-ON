@@ -25,16 +25,30 @@ jobs:
         with:
           name: PhawxON-${{ steps.ver.outputs.ver }}
           path: dist/PhawxON-${{ steps.ver.outputs.ver }}.zip
+      # Releases come from main only. The tag v<version> must be new or already
+      # point at this commit: new binaries never go out under an older commit's tag.
       - name: Release v${{ steps.ver.outputs.ver }}
-        if: contains(github.event.head_commit.message, '[release]') || github.event_name == 'workflow_dispatch'
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           VER: ${{ steps.ver.outputs.ver }}
         run: |
+          tag_sha=$(git ls-remote --tags origin | awk -v t="refs/tags/v$VER" \
+            '$2 == t "^{}" { p = $1 } $2 == t { d = $1 } END { print (p != "" ? p : d) }')
+          if [ -n "$tag_sha" ] && [ "$tag_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::Tag v$VER already exists and points at $tag_sha, not at this commit ($GITHUB_SHA). Raise the version in src/version.h and res/phawx.manifest, or delete the v$VER release and tag first."
+            exit 1
+          fi
           cp build/PhawxON.exe dist/PhawxON.exe
           if gh release view "v$VER" >/dev/null 2>&1; then
             gh release upload "v$VER" "dist/PhawxON-$VER.zip" dist/PhawxON.exe --clobber
+            gh release edit "v$VER" --notes-file RELEASE_NOTES.md --title "Phawx ON $VER"
           else
             gh release create "v$VER" "dist/PhawxON-$VER.zip" dist/PhawxON.exe \
-              --target "${{ github.sha }}" --title "Phawx ON $VER" --notes-file RELEASE_NOTES.md
+              --target "$GITHUB_SHA" --title "Phawx ON $VER" --notes-file RELEASE_NOTES.md
           fi
+      - name: Not published
+        if: github.ref != 'refs/heads/main'
+        env:
+          REF: ${{ github.ref }}
+        run: echo "::notice::Built from $REF. Releases are only published from main; the zip is in the run's artifacts."

@@ -1,5 +1,7 @@
-/* The one place the version lives: phawx.h, the resource script, the Makefile and
-   the release workflow all read it from here. Keep it macros only (windres reads it). */
+/* The version: phawx.h, the resource script, the Makefile and the release workflow
+   all read it from here. res/phawx.manifest repeats it by hand (assemblyIdentity
+   version="x.y.z.0"), and make dist fails when the two differ. Keep it macros only
+   (windres reads it). */
 #ifndef PH_VERSION_H
 #define PH_VERSION_H
 #define PH_VER_MAJOR 1
