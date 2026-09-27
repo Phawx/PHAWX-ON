@@ -698,20 +698,25 @@ static int set_gpudom(ph_ctl *c, int32_t v)
     ph_clk *nw = ph_gpu_clk();
     gpu_ranges(nw);
     if (!running && m->active && m->val > 0) cap_clk(nw, m->val);
-    char name[64];
-    if (nw && nw->name && WideCharToMultiByte(CP_UTF8, 0, nw->name, -1, name, sizeof name, NULL, NULL))
-        cfg_set_str("global", GPUDOM_NAME, name);
+    /* by name too, so another domain added later does not shift the choice; a name
+       that cannot be stored must not leave an older one behind */
+    char name[256];
+    int ok = nw && nw->name && WideCharToMultiByte(CP_UTF8, 0, nw->name, -1, name, sizeof name, NULL, NULL);
+    cfg_set_str("global", GPUDOM_NAME, ok ? name : NULL);
     return 0;
 }
 
 void autotdp_cfg_loaded(void)
 {
     ph_ctl *c = &ctls[K_GPUDOM];
-    char name[64];
-    wchar_t w[64];
+    char name[256];
+    wchar_t w[128];
     if (!c->active || !cfg_get_str("global", GPUDOM_NAME, name, sizeof name) || !name[0] ||
         !MultiByteToWideChar(CP_UTF8, 0, name, -1, w, PH_ARRAY(w)))
         return;
+    /* the saved index still names it (two domains can share a name) */
+    ph_clk *at = ph_gpu_clk_at(c->val);
+    if (at && at->name && !lstrcmpW(at->name, w)) return;
     for (int i = 0; i < ph_gpu_clk_count(); i++) {
         ph_clk *d = ph_gpu_clk_at(i);
         if (d->name && !lstrcmpW(d->name, w)) { c->val = i; return; }

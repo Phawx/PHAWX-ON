@@ -1312,10 +1312,11 @@ static phx_plugin *owner_of(const void *addr, int deep)
 static phx_plugin *walk(const CONTEXT *ctx)
 {
     static CONTEXT c;                  /* too big for a thread that just faulted */
+    static volatile LONG walking;      /* ... so one thread at a time uses it */
     NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
     DWORD64 lo = (DWORD64)tib->StackLimit, hi = (DWORD64)tib->StackBase;
     phx_plugin *p = NULL;
-    if (!ctx) return NULL;
+    if (!ctx || InterlockedExchange(&walking, 1)) return NULL;
     c = *ctx;
     for (int i = 0; i < 64 && !p; i++) {
         DWORD64 sp = c.Rsp, base = 0, fv = 0, est;
@@ -1336,6 +1337,7 @@ static phx_plugin *walk(const CONTEXT *ctx)
         if (!c.Rip || c.Rsp <= sp) break;
         p = owner_of((const void *)c.Rip, 1);
     }
+    InterlockedExchange(&walking, 0);
     return p;
 }
 

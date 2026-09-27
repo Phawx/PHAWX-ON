@@ -349,7 +349,9 @@ static void app_cleanup(void)
 }
 
 static DWORD crash_tid;
-static volatile LONG crashed;
+static volatile LONG crashed, respawns;
+static volatile DWORD restore_tid;
+static HANDLE restore_done;
 
 /* also when a fault stopped app_cleanup halfway: ph_backends_shutdown then only
    runs the backends it had not finished */
@@ -360,7 +362,16 @@ static DWORD WINAPI crash_restore(LPVOID p)
     ph_backends_shutdown();
     drv_close();
     ph_log("crash: hardware restored");
+    if (restore_done) SetEvent(restore_done);
     return 0;
+}
+
+static void run_restore(void)
+{
+    HANDLE t = CreateThread(NULL, 0, crash_restore, NULL, 0, NULL);
+    if (!t) return;
+    restore_tid = GetThreadId(t);
+    CloseHandle(t);
 }
 
 static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep)
@@ -370,9 +381,12 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep)
         InterlockedExchange(&hw_restored, 1);
         g_main = NULL;
         crash_tid = GetCurrentThreadId();
-        HANDLE t = CreateThread(NULL, 0, crash_restore, NULL, 0, NULL);
-        if (t) { WaitForSingleObject(t, 4000); CloseHandle(t); }
+        run_restore();
+    } else if (GetCurrentThreadId() == restore_tid) {
+        /* a second fault inside the restore: carry on from a fresh thread */
+        if (InterlockedIncrement(&respawns) <= 4) run_restore();
     }
+    if (restore_done) WaitForSingleObject(restore_done, 4000);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -457,6 +471,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
        never the current directory or PATH (users can write to parts of PATH) */
     SetDllDirectoryW(L"");
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    restore_done = CreateEventW(NULL, TRUE, FALSE, NULL);
     SetUnhandledExceptionFilter(crash_filter);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
@@ -515,6 +530,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
     }
 
     app_cleanup();
+    /* a fault on another thread may be restoring right now: do not exit under it */
+    if (crashed && restore_done) WaitForSingleObject(restore_done, 5000);
     if (ui_hwnd()) DestroyWindow(ui_hwnd());
     if (tray_icon) DestroyIcon(tray_icon);
     if (mtx) { ReleaseMutex(mtx); CloseHandle(mtx); }
