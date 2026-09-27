@@ -40,7 +40,8 @@ static void U(void) { LeaveCriticalSection(&lock); }
 
 void ph_register_ctl(ph_ctl *c)
 {
-    if (nctls >= MAX_CTLS || !c) return;
+    if (!c) return;
+    if (nctls >= MAX_CTLS) { ph_log("registry: no room for %s", c->key ? c->key : "a row"); return; }
     if (!c->step) c->step = 1;
     if (!c->active) c->val = c->def;
     if (c->type == CT_CHOICE && c->choices && c->max == 0) {
@@ -65,6 +66,7 @@ void ph_register_ctls(ph_ctl *c, int n)
 }
 
 int ph_ctl_count(void) { return nctls; }
+int ph_ctl_room(void) { return MAX_CTLS - nctls; }
 ph_ctl *ph_ctl_at(int i) { return (i >= 0 && i < nctls) ? ctls[i] : NULL; }
 
 ph_ctl *ph_ctl_find(const char *key)
@@ -101,6 +103,10 @@ void ph_ctl_reset(ph_ctl *c)
     if (!(c->flags & CF_OPTIONAL) && c->set) {
         L();
         c->set(c, c->def);
+        U();
+    } else if ((c->flags & CF_OPTIONAL) && c->release) {
+        L();
+        c->release(c);
         U();
     }
 }
@@ -149,25 +155,19 @@ void ph_backends_init(void)
     }
 }
 
+/* Built-in hardware first, so a plugin that faults cannot stop it, then plugins
+   while PawnIO is still open, then the driver. The crash handler runs this again
+   for whatever a fault interrupted: a built-in is never called twice, the plugin
+   host skips plugins that are done or that crashed. */
 void ph_backends_shutdown(void)
-{
-    for (int i = PH_ARRAY(ph_backends) - 2; i >= 0; i--) {
-        ph_backend *b = ph_backends[i];
-        if (b->alive && b->shutdown) b->shutdown();
-        b->alive = 0;
-    }
-}
-
-/* After a crash: built-in hardware first, so a plugin that faults again cannot stop
-   it, then plugins while PawnIO is still open, then the driver. */
-void ph_backends_shutdown_crash(void)
 {
     for (int pass = 0; pass < 3; pass++)
         for (int i = PH_ARRAY(ph_backends) - 2; i >= 0; i--) {
             ph_backend *b = ph_backends[i];
             int k = b->kind == BK_PLUGIN ? 1 : b->kind == BK_DRIVER ? 2 : 0;
             if (k != pass) continue;
-            if (b->alive && b->shutdown) b->shutdown();
+            if (k == 1 ? !b->alive : !InterlockedExchange(&b->alive, 0)) continue;
+            if (b->shutdown) b->shutdown();
             b->alive = 0;
         }
 }

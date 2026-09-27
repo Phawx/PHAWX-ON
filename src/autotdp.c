@@ -597,14 +597,16 @@ void autotdp_stop(void)
 
 /* Crash path. autotdp_stop would wait forever if the worker is the thread that
    crashed (it sits in the crash filter), and it re-applies user values through
-   callbacks that may be what crashed. Only take the caps off. */
+   callbacks that may be what crashed. Only take the caps off, and only built-in
+   ones: the plugin host resets plugin domains itself, without calling a plugin
+   that crashed or waiting on a lock the crashed thread holds. */
 void autotdp_crash_release(DWORD crashed_tid)
 {
     if (!running) return;
     if (stop_ev) SetEvent(stop_ev);
     if (thr && GetThreadId(thr) != crashed_tid) WaitForSingleObject(thr, 1000);
-    dom_release(&dc);
-    dom_release(&dg);
+    if (dc.d && !dc.d->plugin) dom_release(&dc);
+    if (dg.d && !dg.d->plugin) dom_release(&dg);
     park_apply(0);
     if (epp_set) {
         pw_restore(&sv_epp[0]);
@@ -679,6 +681,10 @@ static void gpu_ranges(ph_clk *d)
     if (m->val > m->max) m->val = m->max;
 }
 
+/* auto.gpudomain is an index into a list sorted by priority, which a plugin with
+   a higher one shifts; the name is saved too and wins when it is still there */
+#define GPUDOM_NAME "auto.gpudomain_name"
+
 static int set_gpudom(ph_ctl *c, int32_t v)
 {
     (void)c;
@@ -692,7 +698,24 @@ static int set_gpudom(ph_ctl *c, int32_t v)
     ph_clk *nw = ph_gpu_clk();
     gpu_ranges(nw);
     if (!running && m->active && m->val > 0) cap_clk(nw, m->val);
+    char name[64];
+    if (nw && nw->name && WideCharToMultiByte(CP_UTF8, 0, nw->name, -1, name, sizeof name, NULL, NULL))
+        cfg_set_str("global", GPUDOM_NAME, name);
     return 0;
+}
+
+void autotdp_cfg_loaded(void)
+{
+    ph_ctl *c = &ctls[K_GPUDOM];
+    char name[64];
+    wchar_t w[64];
+    if (!c->active || !cfg_get_str("global", GPUDOM_NAME, name, sizeof name) || !name[0] ||
+        !MultiByteToWideChar(CP_UTF8, 0, name, -1, w, PH_ARRAY(w)))
+        return;
+    for (int i = 0; i < ph_gpu_clk_count(); i++) {
+        ph_clk *d = ph_gpu_clk_at(i);
+        if (d->name && !lstrcmpW(d->name, w)) { c->val = i; return; }
+    }
 }
 
 static void fmt_fps(const ph_ctl *c, int32_t v, wchar_t *b, int n)

@@ -321,7 +321,7 @@ int app_restart(void)
     return 0;
 }
 
-/* Restore everything that must not outlive the process. Runs once, from WM_DESTROY,
+/* Restore everything that must not outlive the process. Runs once, from
    WM_ENDSESSION or the end of wWinMain. g_main is cleared first so AutoTDP does not
    record itself as switched off. */
 static void app_cleanup(void)
@@ -348,24 +348,27 @@ static void app_cleanup(void)
     if (m) Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
-static void *crash_addr;
 static DWORD crash_tid;
+static volatile LONG crashed;
 
+/* also when a fault stopped app_cleanup halfway: ph_backends_shutdown then only
+   runs the backends it had not finished */
 static DWORD WINAPI crash_restore(LPVOID p)
 {
     (void)p;
-    plugins_crash_note(crash_addr);
     autotdp_crash_release(crash_tid);
-    ph_backends_shutdown_crash();
+    ph_backends_shutdown();
     drv_close();
+    ph_log("crash: hardware restored");
     return 0;
 }
 
 static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep)
 {
-    if (!InterlockedExchange(&hw_restored, 1)) {
+    plugins_crash_note(ep);
+    if (!InterlockedExchange(&crashed, 1)) {
+        InterlockedExchange(&hw_restored, 1);
         g_main = NULL;
-        crash_addr = ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionAddress : NULL;
         crash_tid = GetCurrentThreadId();
         HANDLE t = CreateThread(NULL, 0, crash_restore, NULL, 0, NULL);
         if (t) { WaitForSingleObject(t, 4000); CloseHandle(t); }
@@ -387,6 +390,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_PH_NAV: ui_nav((int)w); return 0;
     case WM_PH_HOLD: ui_hold((int)w, (int)l); return 0;
     case WM_PH_REFRESH: ui_refresh(); app_tray_update(); return 0;
+    case WM_PH_UPDATE: plugins_update((void *)w, (void *)l); return 0;
     case WM_HOTKEY: if (w == HK_MENU) ui_toggle(); return 0;
     case WM_INPUT: input_on_rawinput(h, l); return DefWindowProcW(h, m, w, l);
     case WM_INPUT_DEVICE_CHANGE: input_on_devchange(); return 0;
@@ -415,7 +419,9 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (w) app_cleanup();
         return 0;
     case WM_DESTROY:
-        app_cleanup();
+        /* cleanup runs after the message loop: here Windows is calling back into
+           the app, and a fault in a plugin's shutdown can be swallowed on the way
+           out instead of reaching the crash filter */
         PostQuitMessage(0);
         return 0;
     default:
@@ -447,8 +453,10 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
             return 0;
         }
     }
-    /* elevated: never look in the current directory for DLLs */
+    /* elevated: DLLs loaded by name come from the exe folder and System32 only,
+       never the current directory or PATH (users can write to parts of PATH) */
     SetDllDirectoryW(L"");
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     SetUnhandledExceptionFilter(crash_filter);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
@@ -475,6 +483,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
     autotdp_register_ctls();
     ph_register_ctls(app_ctls, PH_ARRAY(app_ctls));
     cfg_load();
+    autotdp_cfg_loaded();
     pins_load();
     /* 1.1 turned per-game profiles off by default; keep them switching for anyone
        who already saved one under 1.0 (asked once, so a later Default sticks) */
@@ -484,6 +493,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
         cfg_set_int("global", "app.migrated", 1);
     }
     ph_apply_all(0);
+    plugins_started();
 
     ui_init(hi);
     input_init(g_main);

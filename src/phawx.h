@@ -75,6 +75,7 @@ struct ph_ctl {
     uint8_t            dirty;
     int16_t            order;     /* sort key within page, lower first */
     ph_sub_fn          sub;       /* optional status line under the label */
+    void             (*release)(ph_ctl *c);  /* optional, CF_OPTIONAL: it went back to Default */
 };
 
 /* ---------- clock domains used by AutoTDP ---------- */
@@ -88,6 +89,7 @@ typedef struct ph_clk {
     int  (*util)(struct ph_clk *d, int *pct);     /* optional busy % */
     void *ctx;
     int  prio;                                    /* higher wins among same kind */
+    int  plugin;                                  /* a plugin's: after a crash the plugin host resets it */
 } ph_clk;
 
 /* ---------- backends (plugins) ---------- */
@@ -102,7 +104,7 @@ typedef struct ph_backend {
     void (*shutdown)(void);       /* restore anything that must not persist */
     void (*resume)(void);         /* optional: after sleep */
     void (*tick)(void);           /* optional: called ~1 Hz while menu visible */
-    int  alive;
+    volatile LONG alive;
 } ph_backend;
 
 /* registry.c */
@@ -111,6 +113,7 @@ void     ph_register_ctls(ph_ctl *c, int n);
 void     ph_register_cpu_clk(ph_clk *d);
 void     ph_register_gpu_clk(ph_clk *d);
 int      ph_ctl_count(void);
+int      ph_ctl_room(void);           /* rows that can still be registered */
 ph_ctl  *ph_ctl_at(int i);
 ph_ctl  *ph_ctl_find(const char *key);
 int      ph_ctl_apply(ph_ctl *c, int32_t v);
@@ -122,8 +125,7 @@ ph_clk  *ph_gpu_clk_at(int i);
 int      ph_gpu_clk_count(void);
 void     ph_select_gpu_clk(int i);
 void     ph_backends_init(void);
-void     ph_backends_shutdown(void);
-void     ph_backends_shutdown_crash(void);
+void     ph_backends_shutdown(void);  /* also from the crash handler: only backends still alive */
 void     ph_backends_resume(void);
 void     ph_backends_tick(void);
 extern ph_backend *const ph_backends[];
@@ -224,7 +226,7 @@ typedef struct ph_fps {
     wchar_t exe[64];
 } ph_fps;
 int  fps_start(void);                  /* 0 ok, -1 PresentMon unavailable */
-int  fps_status(void);                 /* 0 missing, 1 service unreachable, 2 ok */
+int  fps_status(void);                 /* 0 missing, 1 service unreachable, 2 ok, -1 first check running */
 const wchar_t *fps_version(void);      /* version of the loaded PresentMon, L"" if unknown */
 void fps_stop(void);
 int  fps_sample(ph_fps *out);          /* foreground presenting process */
@@ -259,14 +261,15 @@ void autotdp_crash_release(DWORD crashed_tid);   /* crash path: uncap clocks wit
 int  autotdp_running(void);
 void autotdp_state(ph_auto_state *s);
 void autotdp_register_ctls(void);
+void autotdp_cfg_loaded(void);                   /* after cfg_load: find the saved GPU domain by name */
 
 /* ---------- config (config.c) ---------- */
 void cfg_load(void);
 void cfg_save(void);
 int  cfg_get_int(const char *sec, const char *key, int def);
 void cfg_set_int(const char *sec, const char *key, int v);
-int  cfg_get_str(const char *sec, const char *key, char *out, int n);
-void cfg_set_str(const char *sec, const char *key, const char *v);   /* NULL deletes the key */
+int  cfg_get_str(const char *sec, const char *key, char *out, int n); /* 1 = found; cut at a UTF-8 character to fit */
+int  cfg_set_str(const char *sec, const char *key, const char *v);   /* NULL deletes the key; -1 if too long (511) */
 void cfg_clear(const char *sec);                                    /* delete a whole section */
 const wchar_t *cfg_file(void);
 void cfg_load_profile(const wchar_t *exe);  /* NULL = global */
@@ -321,7 +324,9 @@ int  ph_ctl_pinnable(const ph_ctl *c);
 /* ---------- plugins (plugins.c) ---------- */
 extern ph_backend bk_plugins;
 int  plugins_restart_pending(void);
-void plugins_crash_note(void *fault_addr);   /* crash filter: remember which plugin faulted */
+void plugins_started(void);                  /* the first ph_apply_all after loading has returned */
+void plugins_update(void *plugin, void *control);  /* WM_PH_UPDATE: host->update from another thread */
+void plugins_crash_note(EXCEPTION_POINTERS *ep);   /* crash filter, on the faulting thread: which plugin faulted */
 
 /* ---------- tray / app (main.c) ---------- */
 #define WM_PH_TRAY     (WM_APP + 1)
@@ -330,6 +335,7 @@ void plugins_crash_note(void *fault_addr);   /* crash filter: remember which plu
 #define WM_PH_REFRESH  (WM_APP + 4)
 #define WM_PH_FGCHANGE (WM_APP + 5)
 #define WM_PH_HOLD     (WM_APP + 6)     /* wParam HOLD_* source, lParam 1 down / 0 up */
+#define WM_PH_UPDATE   (WM_APP + 7)     /* wParam plugin, lParam its phx_control */
 extern HWND g_main;
 extern HINSTANCE g_inst;
 void app_tray_update(void);
@@ -356,6 +362,8 @@ int   gpu_class_keys(const wchar_t *ven, wchar_t keys[][128], int max);  /* disp
 int   ph_exe_dir(wchar_t *out, int n);                  /* folder of PhawxON.exe, no trailing slash */
 int   ph_path_protected(const wchar_t *path);           /* inside Program Files (admin-only writes) */
 int   ph_file_version(const wchar_t *path, int ver[3], wchar_t *desc, int ndesc); /* product version + FileDescription */
+int   ph_file_string(const wchar_t *path, const wchar_t *name, wchar_t *out, int n); /* a StringFileInfo value */
+int   ph_program_files(wchar_t *out, int n);            /* the real Program Files, not %ProgramFiles% */
 void  ph_fmt_version(wchar_t *out, int n, const int ver[3]);                  /* "2.0" or "2.0.1" */
 int   ph_open_url(const wchar_t *target);               /* open in the user's (unelevated) shell */
 void *ph_alloc(size_t n);

@@ -64,9 +64,10 @@ static int install_dir(wchar_t *d)
                 if (n && d[n - 1] != L'\\' && n + 1 < MAX_PATH) { d[n] = L'\\'; d[n + 1] = 0; }
                 return 1;
             }
-    DWORD n = GetEnvironmentVariableW(L"ProgramFiles", d, MAX_PATH);
-    if (!n || n >= MAX_PATH - 10) return 0;
-    ph_swprintf(d + n, MAX_PATH - n, L"\\PawnIO\\");
+    /* not %ProgramFiles%: a user can point that at a folder they can write to */
+    if (ph_program_files(d, MAX_PATH - 10)) return 0;
+    size_t n = wcslen(d);
+    ph_swprintf(d + n, MAX_PATH - (int)n, L"\\PawnIO\\");
     return 1;
 }
 
@@ -134,7 +135,7 @@ static int pio_open(void)
     wchar_t path[MAX_PATH];
     pawnio_state = DRV_MISSING;
     if (!find_file(L"PawnIOLib.dll", path)) return -1;
-    lib = LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    lib = LoadLibraryExW(path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!lib) return -1;
     p_version = (pio_version_t)GetProcAddress(lib, "pawnio_version");
     p_open    = (pio_open_t)GetProcAddress(lib, "pawnio_open");

@@ -5,7 +5,7 @@
    plugin that is off, hardware that is gone) are kept so the pin comes back. */
 
 #define MAX_PINS 64
-#define KEY_LEN  64
+#define KEY_LEN  80     /* plugin keys are up to 79 characters */
 
 static char pins[MAX_PINS][KEY_LEN];
 static int npins;
@@ -65,6 +65,6 @@ int pin_toggle(const char *key)
 
 int ph_ctl_pinnable(const ph_ctl *c)
 {
-    if (!c || !c->key || c->page == PG_QUICK || (c->flags & CF_NOPIN)) return 0;
+    if (!c || !c->key || c->page == PG_QUICK || (c->flags & CF_NOPIN) || lstrlenA(c->key) >= KEY_LEN) return 0;
     return c->type == CT_SLIDER || c->type == CT_TOGGLE || c->type == CT_CHOICE || c->type == CT_ACTION;
 }

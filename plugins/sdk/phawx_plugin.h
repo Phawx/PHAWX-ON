@@ -106,6 +106,7 @@ struct phx_control {
     /* kept up to date by the host before it calls you; read-only */
     int32_t  value;                   /* last applied value (def while at Default) */
     int32_t  active;                  /* 1 = the user chose a value, 0 = Default */
+    const wchar_t *desc;              /* optional: the confirmation text of a PHX_F_DANGER row; yours, keep it valid */
 };
 
 /* ---------- clock domains ----------
@@ -265,7 +266,7 @@ PHX_INLINE void phx_logf(const phx_host *host, phx_plugin *self, const char *fmt
 }
 
 /* layout checks: a failure here means this compiler would break the ABI */
-typedef char phx_check_control[sizeof(phx_control) == 112 ? 1 : -1];
+typedef char phx_check_control[sizeof(phx_control) == 120 ? 1 : -1];
 typedef char phx_check_clock[sizeof(phx_clock) == 80 ? 1 : -1];
 typedef char phx_check_fan[sizeof(phx_fan) == 56 ? 1 : -1];
 typedef char phx_check_rgb_state[sizeof(phx_rgb_state) == 12 ? 1 : -1];

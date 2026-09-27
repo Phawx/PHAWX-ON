@@ -325,7 +325,10 @@ static phx_control ctl[C_N] = {
        auto-start service that stays after Phawx ON exits */
     [C_TABLE] = { .size = sizeof(phx_control), .type = PHX_TOGGLE, .key = "table", .label = L"Read power table",
                   .page = PHX_PAGE_CPU, .order = 7, .flags = PHX_F_DANGER | PHX_F_NOSAVE, .def = 0,
-                  .get = get_table, .set = set_table },
+                  .get = get_table, .set = set_table,
+                  .desc = L"Reads the power table through the InpOut driver. Its DLL installs the driver as a Windows "
+                          L"service (inpoutx64) that stays after Phawx ON exits. To remove it: sc delete inpoutx64, "
+                          L"restart, then delete C:\\Windows\\System32\\drivers\\inpoutx64.sys. Takes effect after a restart." },
 };
 
 /* ---------- iGPU clock for AutoTDP (Raven, Picasso, Dali, Lucienne only) ---------- */

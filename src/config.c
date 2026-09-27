@@ -44,11 +44,19 @@ void cfg_load(void)
     cfg_load_profile(NULL);
 }
 
+/* a value that does not fit is cut after its last whole UTF-8 character */
 static void w2a(const wchar_t *w, char *a, int n)
 {
+    char t[512 * 3 + 1];
     if (n <= 0) return;
-    if (!WideCharToMultiByte(CP_UTF8, 0, w, -1, a, n, NULL, NULL)) a[0] = 0;
-    a[n - 1] = 0;
+    int k = WideCharToMultiByte(CP_UTF8, 0, w, -1, t, sizeof t, NULL, NULL) - 1;
+    if (k < 0) k = 0;
+    if (k > n - 1) {
+        k = n - 1;
+        while (k > 0 && ((unsigned char)t[k] & 0xC0) == 0x80) k--;
+    }
+    for (int i = 0; i < k; i++) a[i] = t[i];
+    a[k] = 0;
 }
 
 static void sec_for(const wchar_t *exe, wchar_t *out, int n)
@@ -71,14 +79,15 @@ int cfg_get_str(const char *sec, const char *key, char *out, int n)
     return 1;
 }
 
-void cfg_set_str(const char *sec, const char *key, const char *v)
+/* a value longer than 511 characters is refused rather than written empty */
+int cfg_set_str(const char *sec, const char *key, const char *v)
 {
     wchar_t ws[128], wk[128], wv[512];
     cfg_open();
     if (!MultiByteToWideChar(CP_UTF8, 0, sec, -1, ws, 128) || !MultiByteToWideChar(CP_UTF8, 0, key, -1, wk, 128))
-        return;
-    if (v && !MultiByteToWideChar(CP_UTF8, 0, v, -1, wv, 512)) wv[0] = 0;
-    WritePrivateProfileStringW(ws, wk, v ? wv : NULL, ini);
+        return -1;
+    if (v && !MultiByteToWideChar(CP_UTF8, 0, v, -1, wv, 512)) return -1;
+    return WritePrivateProfileStringW(ws, wk, v ? wv : NULL, ini) ? 0 : -1;
 }
 
 void cfg_clear(const char *sec)

@@ -236,10 +236,11 @@ static HMODULE load_nvml(void)
 {
     HMODULE h = LoadLibraryExW(L"nvml.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (h) return h;
+    /* older drivers: Program Files from the known folder, since a user can set %ProgramW6432% */
     wchar_t p[MAX_PATH];
-    DWORD n = ExpandEnvironmentStringsW(L"%ProgramW6432%\\NVIDIA Corporation\\NVSMI\\nvml.dll", p, MAX_PATH);
-    if (!n || n > MAX_PATH || p[0] == L'%') return NULL;
-    return LoadLibraryExW(p, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (ph_program_files(p, MAX_PATH - 40)) return NULL;
+    lstrcatW(p, L"\\NVIDIA Corporation\\NVSMI\\nvml.dll");
+    return LoadLibraryExW(p, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
 }
 
 static void unload(void)

@@ -200,19 +200,29 @@ int ph_exe_dir(wchar_t *out, int n)
     return 0;
 }
 
+/* known folders come from HKLM; %ProgramFiles% can be overridden per user */
+static const GUID folder_ids[] = {
+    { 0x905e63b6, 0xc1bf, 0x494e, { 0xb2, 0x9c, 0x65, 0xb7, 0x32, 0xd3, 0xd2, 0x1a } },  /* ProgramFiles */
+    { 0x7c5a40ef, 0xa0fb, 0x4bfc, { 0x87, 0x4a, 0xc0, 0xf2, 0xe0, 0xb9, 0xfa, 0x8e } },  /* ProgramFilesX86 */
+};
+
+int ph_program_files(wchar_t *out, int n)
+{
+    PWSTR pf = NULL;
+    out[0] = 0;
+    if (SUCCEEDED(SHGetKnownFolderPath(&folder_ids[0], 0, NULL, &pf)) && pf && lstrlenW(pf) < n) lstrcpynW(out, pf, n);
+    CoTaskMemFree(pf);
+    return out[0] ? 0 : -1;
+}
+
 /* Under Program Files, where only administrators can write. Anything that runs
    elevated from a folder must live there (autostart task, plugins). */
 int ph_path_protected(const wchar_t *path)
 {
-    /* known folders come from HKLM; %ProgramFiles% can be overridden per user */
-    static const GUID ids[] = {
-        { 0x905e63b6, 0xc1bf, 0x494e, { 0xb2, 0x9c, 0x65, 0xb7, 0x32, 0xd3, 0xd2, 0x1a } },  /* ProgramFiles */
-        { 0x7c5a40ef, 0xa0fb, 0x4bfc, { 0x87, 0x4a, 0xc0, 0xf2, 0xe0, 0xb9, 0xfa, 0x8e } },  /* ProgramFilesX86 */
-    };
-    for (int i = 0; i < PH_ARRAY(ids); i++) {
+    for (int i = 0; i < PH_ARRAY(folder_ids); i++) {
         PWSTR pf = NULL;
         int hit = 0;
-        if (SUCCEEDED(SHGetKnownFolderPath(&ids[i], 0, NULL, &pf)) && pf) {
+        if (SUCCEEDED(SHGetKnownFolderPath(&folder_ids[i], 0, NULL, &pf)) && pf) {
             int n = lstrlenW(pf);
             hit = n > 2 && !_wcsnicmp(path, pf, (size_t)n) && path[n] == L'\\';
         }
@@ -223,33 +233,55 @@ int ph_path_protected(const wchar_t *path)
 }
 
 /* Reads the version resource without running any code from the file. */
-int ph_file_version(const wchar_t *path, int ver[3], wchar_t *desc, int ndesc)
+static BYTE *ver_load(const wchar_t *path)
 {
     DWORD h = 0, sz = GetFileVersionInfoSizeW(path, &h);
+    if (!sz || sz > (1u << 20)) return NULL;
+    BYTE *b = ph_alloc(sz);
+    if (b && !GetFileVersionInfoW(path, 0, sz, b)) { ph_free(b); b = NULL; }
+    return b;
+}
+
+/* a StringFileInfo value, in the file's first translation */
+static void ver_string(BYTE *b, const wchar_t *name, wchar_t *out, int n)
+{
+    WORD *tr = NULL;
+    wchar_t q[96], *s = NULL;
+    UINT tn = 0, sl = 0;
+    out[0] = 0;
+    if (!VerQueryValueW(b, L"\\VarFileInfo\\Translation", (void **)&tr, &tn) || !tr || tn < 4) return;
+    ph_swprintf(q, PH_ARRAY(q), L"\\StringFileInfo\\%04x%04x\\%s", tr[0], tr[1], name);
+    if (VerQueryValueW(b, q, (void **)&s, &sl) && s && sl > 1) lstrcpynW(out, s, n);
+}
+
+int ph_file_version(const wchar_t *path, int ver[3], wchar_t *desc, int ndesc)
+{
     int rc = -1;
     if (desc && ndesc > 0) desc[0] = 0;
-    if (!sz || sz > (1u << 20)) return -1;
-    BYTE *b = ph_alloc(sz);
+    BYTE *b = ver_load(path);
     if (!b) return -1;
-    if (GetFileVersionInfoW(path, 0, sz, b)) {
-        VS_FIXEDFILEINFO *fi = NULL;
-        UINT n = 0;
-        if (ver && VerQueryValueW(b, L"\\", (void **)&fi, &n) && fi && n >= sizeof *fi && fi->dwSignature == 0xFEEF04BD) {
-            ver[0] = HIWORD(fi->dwProductVersionMS);
-            ver[1] = LOWORD(fi->dwProductVersionMS);
-            ver[2] = HIWORD(fi->dwProductVersionLS);
-            rc = 0;
-        }
-        WORD *tr = NULL;
-        if (desc && ndesc > 0 && VerQueryValueW(b, L"\\VarFileInfo\\Translation", (void **)&tr, &n) && tr && n >= 4) {
-            wchar_t q[64], *s = NULL;
-            UINT sl = 0;
-            ph_swprintf(q, PH_ARRAY(q), L"\\StringFileInfo\\%04x%04x\\FileDescription", tr[0], tr[1]);
-            if (VerQueryValueW(b, q, (void **)&s, &sl) && s && sl > 1) lstrcpynW(desc, s, ndesc);
-        }
+    VS_FIXEDFILEINFO *fi = NULL;
+    UINT n = 0;
+    if (ver && VerQueryValueW(b, L"\\", (void **)&fi, &n) && fi && n >= sizeof *fi && fi->dwSignature == 0xFEEF04BD) {
+        ver[0] = HIWORD(fi->dwProductVersionMS);
+        ver[1] = LOWORD(fi->dwProductVersionMS);
+        ver[2] = HIWORD(fi->dwProductVersionLS);
+        rc = 0;
     }
+    if (desc && ndesc > 0) ver_string(b, L"FileDescription", desc, ndesc);
     ph_free(b);
     return rc;
+}
+
+int ph_file_string(const wchar_t *path, const wchar_t *name, wchar_t *out, int n)
+{
+    if (n <= 0) return -1;
+    out[0] = 0;
+    BYTE *b = ver_load(path);
+    if (!b) return -1;
+    ver_string(b, name, out, n);
+    ph_free(b);
+    return out[0] ? 0 : -1;
 }
 
 void ph_fmt_version(wchar_t *out, int n, const int ver[3])

@@ -1,5 +1,4 @@
 #include "phawx.h"
-#include <objbase.h>
 #include <string.h>
 
 typedef int pm_status;
@@ -51,7 +50,7 @@ enum { E_QPC, E_CPU, E_GPU, E_N };
 static SRWLOCK   lock = SRWLOCK_INIT;
 static SRWLOCK   ctl = SRWLOCK_INIT;
 static HANDLE    thr, quit_ev, wake_ev, frame_ev;
-static volatile LONG status;
+static volatile LONG status, checked;   /* checked: status is more than a first guess */
 static ph_fps    snap;
 static int       snap_ok;
 static uint64_t  last_probe;
@@ -75,23 +74,6 @@ static wchar_t   cur_exe[64];
 static uint64_t  fg_check, track_retry, sess_retry;
 static int       errs;
 static float     scratch[RING];
-
-static const GUID FOLDERID_PF = { 0x905e63b6, 0xc1bf, 0x494e, { 0xb2, 0x9c, 0x65, 0xb7, 0x32, 0xd3, 0xd2, 0x1a } };
-typedef HRESULT (WINAPI *kf_fn)(const GUID *, DWORD, HANDLE, PWSTR *);
-
-static int program_files(wchar_t *out, int n)
-{
-    HMODULE sh = GetModuleHandleW(L"shell32.dll");
-    if (!sh) sh = LoadLibraryW(L"shell32.dll");
-    kf_fn f = sh ? (kf_fn)GetProcAddress(sh, "SHGetKnownFolderPath") : NULL;
-    PWSTR p = NULL;
-    out[0] = 0;
-    if (f && SUCCEEDED(f(&FOLDERID_PF, 0, NULL, &p)) && p) {
-        lstrcpynW(out, p, n);
-        CoTaskMemFree(p);
-    }
-    return out[0] ? 0 : -1;
-}
 
 static int under_dir(const wchar_t *path, const wchar_t *dir)
 {
@@ -156,7 +138,8 @@ static HMODULE load_file(const wchar_t *p, const wchar_t *pf)
     if (!GetFullPathNameW(p, MAX_PATH, full, NULL)) return NULL;
     if (!under_dir(full, pf)) return NULL;
     if (GetFileAttributesW(full) == INVALID_FILE_ATTRIBUTES) return NULL;
-    return LoadLibraryExW(full, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    /* its dependencies from its own folder and System32, never PATH */
+    return LoadLibraryExW(full, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
 }
 
 static HMODULE try_load(const wchar_t *dir, const wchar_t *sub, const wchar_t *pf)
@@ -170,7 +153,7 @@ static int pm_load(int start_svc)
 {
     if (pm.dll) return 0;
     wchar_t pf[MAX_PATH], svc[MAX_PATH], par[MAX_PATH], def[MAX_PATH];
-    if (program_files(pf, MAX_PATH)) return -1;
+    if (ph_program_files(pf, MAX_PATH)) return -1;
     static const wchar_t *subs[] = { L"", L"SDK", L"PresentMonApplication", L"PresentMonService" };
     HMODULE h = NULL;
     int have_svc = !service_dir(svc, MAX_PATH, start_svc);
@@ -552,6 +535,7 @@ static DWORD WINAPI worker(LPVOID u)
             } else {
                 InterlockedExchange(&status, 2);
             }
+            InterlockedExchange(&checked, 1);
         }
         if (sess) {
             if (now >= fg_check) {
@@ -594,6 +578,7 @@ static int start_locked(void)
         last_probe = now;
         if (pm_load(1)) {
             InterlockedExchange(&status, 0);
+            InterlockedExchange(&checked, 1);
             ph_log("fps: PresentMon not found");
             return -1;
         }
@@ -665,8 +650,10 @@ int fps_status(void)
         if (!pm.dll && !thr && (!last_probe || now - last_probe >= 10000)) {
             last_probe = now;
             InterlockedExchange(&status, pm_load(0) ? 0 : 1);
+            InterlockedExchange(&checked, 1);
         }
         ReleaseSRWLockExclusive(&ctl);
     }
-    return (int)status;
+    /* the DLL is there and the worker has not tried the service yet */
+    return status == 1 && !checked ? -1 : (int)status;
 }
