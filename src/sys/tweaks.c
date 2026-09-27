@@ -114,7 +114,8 @@ static int t_probe(void) { return 1; }
 static int t_init(void)
 {
     int build = win_build(), n = 0;
-    ctls[n++] = (ph_ctl){ .key = NULL, .label = L"Windows", .type = CT_HEADER, .page = PG_SYSTEM, .order = 100 };
+    ctls[n++] = (ph_ctl){ .key = NULL, .label = L"Windows", .type = CT_HEADER, .page = PG_SYSTEM, .order = 3000,
+                          .flags = CF_SECTION };
     for (int i = 0; i < NT; i++) {
         const tweak *t = &tweaks[i];
         if (t->build_min && build && build < t->build_min) continue;
@@ -122,7 +123,7 @@ static int t_init(void)
         if (t->avail && !t->avail()) continue;
         ctls[n] = (ph_ctl){
             .key = t->key, .label = t->label, .type = t->choices ? CT_CHOICE : CT_TOGGLE,
-            .page = PG_SYSTEM, .order = (int16_t)(101 + i),
+            .page = PG_SYSTEM, .order = (int16_t)(3001 + i),
             .flags = (uint16_t)(CF_OPTIONAL | CF_NOSAVE | t->flags),
             .choices = t->choices, .get = t_get, .set = t_set, .ctx = (void *)t,
         };

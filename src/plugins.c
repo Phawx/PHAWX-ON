@@ -14,12 +14,12 @@
 #define MAX_PLUGINS 16
 #define MAX_PCTL    48
 #define MAX_PCAP    4
-#define ORDER_BASE  1000     /* plugin rows follow the built-in rows on every page */
+#define ORDER_BASE  5000     /* plugin rows follow the built-in rows on every page */
 #define ORDER_SPAN  1000     /* one block per plugin so plugins do not interleave */
-#define FAN_BASE    20000
-#define RGB_BASE    25000
+#define FAN_BASE    200      /* System: in the Fan control section (100), after the built-in fan */
+#define RGB_BASE    2010     /* System: in the Lighting section (2000) */
 #define KEY_MAX     80
-#define CTL_RESERVE 48       /* AutoTDP's and the Settings page's rows register after the plugins */
+#define CTL_RESERVE 160      /* Hardware info's (at most 112), AutoTDP's and Settings' rows register after the plugins */
 
 enum { PS_OFF, PS_RUNNING, PS_UNSUPPORTED, PS_FAILED, PS_CRASHED, PS_INVALID };
 
@@ -38,12 +38,13 @@ typedef struct pclk {
 } pclk;
 
 enum { FC_HDR, FC_MODE, FC_SPEED, FC_RPM, FC_N };
-enum { FM_AUTO, FM_MANUAL, FM_FULL };
+enum { FM_AUTO, FM_MANUAL, FM_FULL, FM_CURVE };
 typedef struct pfan {
     phx_fan *pub;
     struct phx_plugin *owner;
     ph_ctl c[FC_N];
-    char kmode[KEY_MAX], kspeed[KEY_MAX];
+    ph_fan curve;                /* its Curve mode (fans.c): one more row */
+    char kmode[KEY_MAX], kspeed[KEY_MAX], kcurve[KEY_MAX];
     int touched;
 } pfan;
 
@@ -91,7 +92,8 @@ static volatile LONG crash_mode;
 #define ENTER(p) EnterCriticalSection(&(p)->lk)
 #define LEAVE(p) LeaveCriticalSection(&(p)->lk)
 
-static const uint8_t page_map[] = { PG_QUICK, PG_CPU, PG_POWER, PG_GPU, PG_DISPLAY, PG_SYSTEM, PG_PLUGINS };
+/* PHX_PAGE_* to pages; the Power tab became a section of System */
+static const uint8_t page_map[] = { PG_QUICK, PG_CPU, PG_SYSTEM, PG_GPU, PG_DISPLAY, PG_SYSTEM, PG_PLUGINS };
 
 static void a2w(const char *a, wchar_t *w, int n)
 {
@@ -239,7 +241,8 @@ static int key_taken(phx_plugin *p, const char *full)
     for (int i = 0; i < p->nctl; i++)
         if (!lstrcmpA(p->ctl[i]->key, full)) return 1;
     for (int i = 0; i < p->nfan; i++)
-        if (!lstrcmpA(p->fan[i]->kmode, full) || !lstrcmpA(p->fan[i]->kspeed, full)) return 1;
+        if (!lstrcmpA(p->fan[i]->kmode, full) || !lstrcmpA(p->fan[i]->kspeed, full) || !lstrcmpA(p->fan[i]->kcurve, full))
+            return 1;
     for (int i = 0; i < p->nrgb; i++)
         if (!lstrcmpA(p->rgb[i]->kmode, full) || !lstrcmpA(p->rgb[i]->kcolor, full) || !lstrcmpA(p->rgb[i]->kbright, full))
             return 1;
@@ -385,7 +388,7 @@ static int PHX_CALL h_add_clock(phx_plugin *p, phx_clock *d)
 
 /* ---------- fans ---------- */
 
-static const wchar_t *const fan_modes[] = { L"Auto", L"Manual", L"Full speed", NULL };
+static const wchar_t *const fan_modes[] = { L"Auto", L"Manual", L"Full speed", L"Curve", NULL };
 
 static int fan_apply(pfan *f, int mode, int pct)
 {
@@ -402,14 +405,24 @@ static int fan_apply(pfan *f, int mode, int pct)
     return r ? -1 : 0;
 }
 
-static int fan_set_mode(ph_ctl *c, int32_t v) { pfan *f = c->ctx; return fan_apply(f, v, f->c[FC_SPEED].val); }
+static int fan_set_mode(ph_ctl *c, int32_t v)
+{
+    pfan *f = c->ctx;
+    fan_curve_use(&f->curve, v == FM_CURVE);
+    if (v == FM_CURVE) return 0;      /* fans_tick sets the duty from here on */
+    return fan_apply(f, v, f->c[FC_SPEED].val);
+}
 
 /* Default: back to the firmware at once, not only at the next tick */
 static void fan_release(ph_ctl *c)
 {
     pfan *f = c->ctx;
+    fan_curve_use(&f->curve, 0);
     if (f->touched) fan_apply(f, FM_AUTO, 0);
 }
+
+static int curve_duty(ph_fan *cf, int pct) { return fan_apply(cf->ctx, FM_MANUAL, pct); }
+static int curve_auto(ph_fan *cf) { return fan_apply(cf->ctx, FM_AUTO, 0); }
 
 static int fan_set_speed(ph_ctl *c, int32_t v)
 {
@@ -432,20 +445,22 @@ static int fan_rpm(ph_ctl *c, int32_t *o)
 
 static int PHX_CALL h_add_fan(phx_plugin *p, phx_fan *f)
 {
-    char km[KEY_MAX], ks[KEY_MAX];
+    char km[KEY_MAX], ks[KEY_MAX], kc[KEY_MAX];
     if (!p || !p->initing) return reject(p, "fan", "added outside phx_plugin_init");
     if (!f || f->size < PHX_FAN_SIZE_V1 || !f->id || !valid_key(f->id) || !f->set_auto || !f->set_duty)
         return reject(p, "fan", "bad struct");
     if (p->nfan >= MAX_PCAP) return reject(p, "fan", "too many fans");
     ph_snprintf(km, sizeof km, "%s.%s.mode", p->id, f->id);
     ph_snprintf(ks, sizeof ks, "%s.%s.speed", p->id, f->id);
-    if (key_taken(p, km) || key_taken(p, ks)) return reject(p, f->id, "duplicate key");
+    ph_snprintf(kc, sizeof kc, "%s.%s.curve", p->id, f->id);
+    if (key_taken(p, km) || key_taken(p, ks) || key_taken(p, kc)) return reject(p, f->id, "duplicate key");
     pfan *w = ph_alloc(sizeof *w);
     if (!w) return PHX_ERROR;
     w->pub = f;
     w->owner = p;
     lstrcpyA(w->kmode, km);
     lstrcpyA(w->kspeed, ks);
+    lstrcpyA(w->kcurve, kc);
     p->fan[p->nfan++] = w;
     return PHX_OK;
 }
@@ -461,10 +476,12 @@ static void fan_commit(pfan *f)
     f->c[FC_SPEED] = (ph_ctl){ .key = f->kspeed, .label = L"Manual fan speed", .type = CT_SLIDER, .page = PG_SYSTEM,
                                .order = (int16_t)(base + 2), .flags = CF_PROFILE, .min = lo, .max = 100, .step = 5,
                                .def = lo > 50 ? lo : 50, .unit = L"%", .fmt = fmt_pct, .set = fan_set_speed, .ctx = f };
-    f->c[FC_RPM] = (ph_ctl){ .label = L"Fan speed", .type = CT_INFO, .page = PG_SYSTEM, .order = (int16_t)(base + 3),
+    f->c[FC_RPM] = (ph_ctl){ .label = L"Fan speed", .type = CT_INFO, .page = PG_SYSTEM, .order = (int16_t)(base + 4),
                              .unit = L"RPM", .get = f->pub->get_rpm ? fan_rpm : NULL,
                              .flags = f->pub->get_rpm ? 0 : CF_HIDDEN, .ctx = f };
     ph_register_ctls(f->c, FC_N);
+    f->curve = (ph_fan){ .name = f->c[FC_HDR].label, .min_pct = lo, .duty = curve_duty, .autom = curve_auto, .ctx = f };
+    fan_curve_add(&f->curve, f->kcurve, (int16_t)(base + 3), 0);
 }
 
 /* ---------- RGB ---------- */
@@ -818,16 +835,19 @@ static void discard(phx_plugin *p)
 static int commit(phx_plugin *p)
 {
     /* rows under the plugin's own title, not under whatever built-in section is last */
-    int has_hdr[PG_COUNT] = { 0 }, used[PG_COUNT] = { 0 }, n = p->nctl + FC_N * p->nfan + RC_N * p->nrgb;
+    int has_hdr[PG_COUNT] = { 0 }, used[PG_COUNT] = { 0 }, n = p->nctl + (FC_N + 1) * p->nfan + RC_N * p->nrgb;
     for (int i = 0; i < p->nctl; i++) {
         used[p->ctl[i]->c.page] = 1;
-        if (p->ctl[i]->c.type == CT_HEADER) has_hdr[p->ctl[i]->c.page] = 1;
+        /* System is made of sections: there the plugin always gets one of its own,
+           and its headers become the parts of it */
+        if (p->ctl[i]->c.type == CT_HEADER && p->ctl[i]->c.page != PG_SYSTEM) has_hdr[p->ctl[i]->c.page] = 1;
     }
     for (int pg = 0; pg < PG_COUNT; pg++) n += used[pg] && !has_hdr[pg];
     if (n > ph_ctl_room() - CTL_RESERVE) return -1;
     for (int pg = 0; pg < PG_COUNT; pg++) {
         if (!used[pg] || has_hdr[pg]) continue;
         p->hdr[pg] = (ph_ctl){ .label = p->name, .type = CT_HEADER, .page = (uint8_t)pg,
+                               .flags = pg == PG_SYSTEM ? CF_SECTION : 0,
                                .order = (int16_t)(ORDER_BASE + p->index * ORDER_SPAN) };
         ph_register_ctl(&p->hdr[pg]);
     }

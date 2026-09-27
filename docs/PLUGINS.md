@@ -291,10 +291,12 @@ A control is one row in the overlay. Register it with `host->add_control` during
 | `PHX_CHOICE` | An index into `choices`, a NULL-terminated array of up to 64 labels. |
 | `PHX_ACTION` | Called when the row is pressed. |
 | `PHX_INFO` | Read-only: give it `get` (a value) and/or `fmt` (text). Refreshed about once a second while the overlay is open. |
-| `PHX_HEADER` | A section title. If you add rows to a page without a header of yours, Phawx ON adds one with your plugin's name. |
+| `PHX_HEADER` | A section title. If you add rows to a page without a header of yours, Phawx ON adds one with your plugin's name. On the System page, which is made of sections, your plugin always gets a section of its own titled with its name, and your headers become the parts of it. |
 
 - **Keys.** `key` is relative to your plugin: `"stapm"` is stored as `ryzenadj.stapm` in the `[global]` or `[game:<exe>]` section. Use 1 to 40 letters, digits, `_`, `-` and `.`. Sliders, toggles, choices and actions need a key and a `set()`; headers and info rows need neither. Keys must be unique within your plugin, including the keys of your fans and lights. Phawx ON compares keys exactly, but `phawx.ini` ignores case, so do not use two keys that differ only in case.
-- **Order.** `order` (clamped to 0..999) orders your rows on a page. Plugin rows always come after Phawx ON's own rows, each plugin's rows stay together, and the fan and light sections come after all plugins' own rows on the System page.
+- **Order.** `order` (clamped to 0..999) orders your rows on a page. Plugin rows always come after Phawx ON's own rows and each plugin's rows stay together. The System page goes: Power, Fan control (every fan, built-in and from plugins), Lighting (every light), Windows, one section per plugin, Hardware info.
+- **Pages.** `PHX_PAGE_POWER` is kept for old plugins, but there is no Power tab any more: those rows are shown on the System page, like `PHX_PAGE_SYSTEM` ones.
+- **Hardware info.** Info rows (`PHX_INFO`) on the CPU, GPU, Display and System pages also appear in the Hardware info table at the bottom of the System page, with the same label and value.
 - **Values.** `fmt` formats a value (for example mW as "15 W"); `n` is the size of the buffer in `wchar_t` including the terminator. With `fmt`, `unit` and `PHX_F_SIGNED` are ignored. Without it, the value is shown as a number with `unit`.
 - **`value` and `active`.** The host writes these into your struct before every call into your plugin, so the struct must not be `const`. `active` is 0 while the row is at Default, and `value` is then `def`. Both change only after `set()` returns 0, so inside `set()` they still show the previous state.
 - **Failure.** When a change the user made fails (`set()` returns non-zero), they see *Could not apply <label>*, unless the row is an action or you showed a toast of your own. Failures while saved values are applied again are silent.
@@ -335,17 +337,26 @@ A control is one row in the overlay. Register it with `host->add_control` during
 
 ### Fans: `phx_fan`
 
-Give the host three functions and it provides the rows on the System page, under a header with `name`:
+Give the host three functions and it provides the rows in the Fan control section of the System page, under a header with `name`:
 
-- **Fan mode:** Default / Auto / Manual / Full speed, key `<id>.<fan id>.mode`.
+- **Fan mode:** Default / Auto / Manual / Full speed / Curve, key `<id>.<fan id>.mode`.
 - **Manual fan speed:** `min_pct` to 100 % in steps of 5, key `<id>.<fan id>.speed`. Used only while the mode is Manual.
+- **Fan curve:** a graph shown while the mode is Curve (see below).
 - **Fan speed** in RPM, if you provide `get_rpm`.
 
 `set_duty` receives `min_pct`..100 (Full speed is 100). The host calls `set_auto` when the user picks Auto, at once when the user picks Default (retried on every tick until it succeeds), and at exit and after a crash elsewhere, in both cases only if it had set a duty.
 
+**Curve** needs nothing more from you. The user draws a curve of 7 points (fan % at 30, 40 ... 90 °C) and the host calls `set_duty` about once a second, on the UI thread, from the CPU temperature (Intel package temperature, AMD Tctl, both through PawnIO):
+
+- Between two points the duty is interpolated. At 95 °C or more it is 100 %, whatever the curve says. It never goes below `min_pct`.
+- The duty goes up at once; it comes down only after it would drop by 3 % or more, then by at most 5 % a second.
+- The same duty is written again every 5 seconds, for embedded controllers that fall back to automatic.
+- Without a CPU temperature for 5 seconds (no PawnIO, or it stops answering), the host calls `set_auto` and the firmware runs the fan until readings come back.
+- The curve is saved as `[global] <id>.<fan id>.curve` (for example `20,25,35,50,65,85,100`). It is the same for every game. That key belongs to the fan, like `.mode` and `.speed`.
+
 ### RGB lights: `phx_rgb`
 
-The host provides a header with `name` and three rows on the System page:
+The host provides a header with `name` and three rows in the Lighting section of the System page:
 
 - **Lighting:** Default / Off / Solid plus your `effects` (up to 8), key `<id>.<light id>.mode`.
 - **Color:** 9 named colors, if `caps` has `PHX_RGB_COLOR`, key `.color`.
@@ -423,8 +434,8 @@ The exit thread is the UI thread on a normal exit, logoff or restart, and the cr
 |---|---|
 | Plugins | 16 discovered. |
 | Per plugin | 48 controls, 4 clock domains, 4 fans, 4 lights. |
-| In total | 512 rows for Phawx ON and all plugins; 8 CPU and 8 GPU clock domains. |
-| Row budget | A plugin needs one row per control, one header per page it uses without a header of its own, and 4 rows per fan and per light. If its rows would leave fewer than 48 free (Phawx ON's own rows that register after the plugins need them), it is not started: its `shutdown` is called, it shows *too many settings*, and it stays loaded but is never called again. |
+| In total | 1024 rows for Phawx ON and all plugins; 8 CPU and 8 GPU clock domains. |
+| Row budget | A plugin needs one row per control, one header per page it uses without a header of its own (on the System page always one), 5 rows per fan and 4 per light. If its rows would leave fewer than 160 free (the Hardware info table, AutoTDP and the Settings page register after the plugins), it is not started: its `shutdown` is called, it shows *too many settings*, and it stays loaded but is never called again. |
 | Choices | 64 per choice row, 8 effects per light. |
 | Keys | 40 characters (79 with the plugin id), which can all be pinned. |
 | Texts | `set_status` 127 characters, log lines 400 bytes, `cfg` values 511 characters, `PhawxWarning` 319 characters. |

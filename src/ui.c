@@ -14,7 +14,7 @@
 
 enum { TM_ANIM = 1, TM_LIVE, TM_COMMIT, TM_TOAST, TM_HOLD };
 enum { WM_UI_SHOW = WM_APP + 40, WM_UI_TOAST, WM_UI_NAV, WM_UI_REFRESH, WM_UI_HOLD };
-enum { DR_NONE, DR_TAP, DR_SCROLL, DR_SLIDER, DR_CANCEL };   /* DR_CANCEL: slid off its tap */
+enum { DR_NONE, DR_TAP, DR_SCROLL, DR_SLIDER, DR_CANCEL, DR_CURVE };   /* DR_CANCEL: slid off its tap */
 
 #define C_BG     RGB(24, 24, 28)
 #define C_HDR    RGB(33, 33, 39)
@@ -28,9 +28,10 @@ enum { DR_NONE, DR_TAP, DR_SCROLL, DR_SLIDER, DR_CANCEL };   /* DR_CANCEL: slid 
 #define C_DANGER RGB(240, 98, 86)
 #define C_SHADE  RGB(14, 14, 17)
 #define C_TOAST  RGB(58, 60, 72)
+#define C_ZEBRA  RGB(30, 30, 35)
 
 static const wchar_t *const tab_names[PG_COUNT] = {
-    L"Quick", L"CPU", L"Power", L"GPU", L"Display", L"System", L"Plugins", L"Settings"
+    L"Quick", L"CPU", L"GPU", L"Display", L"System", L"Plugins", L"Settings"
 };
 
 static HWND hw, toast_hw;
@@ -75,6 +76,11 @@ static wchar_t live[160];
 static int live_n;
 
 static int drag, down_x, down_y, down_scroll, down_row;
+
+/* the fan curve being edited: its point under the cursor, and whether up / down
+   change that point (A starts and ends editing) */
+static int cpt = 3;
+static ph_ctl *cedit;
 
 static int S(int v) { return MulDiv(v, dpi, 96); }
 static int on_ui(void) { return GetCurrentThreadId() == ui_tid; }
@@ -180,13 +186,18 @@ static int locked(const ph_ctl *c) { return (c->flags & CF_AUTOTDP) && c->type !
 
 /* a persisted setting a long press resets; rows without a key (plugin switches,
    links) have nothing to reset */
+static int has_default(const ph_ctl *c) { return c->key || c->type == CT_CURVE; }
+
 static int holdable(const ph_ctl *c)
 {
-    return c && c->key && selectable(c) && c->type != CT_ACTION && !locked(c);
+    return c && has_default(c) && selectable(c) && c->type != CT_ACTION && !locked(c);
 }
 
 /* ... and it is away from Default */
 static int resettable(const ph_ctl *c) { return holdable(c) && c->active; }
+
+static int is_section(const ph_ctl *c) { return c->type == CT_HEADER && (c->flags & CF_SECTION); }
+static int is_table(const ph_ctl *c) { return c->type == CT_INFO && (c->flags & CF_TABLE); }
 
 static int pin_help_get(ph_ctl *c, int32_t *out) { (void)c; *out = TONE_DIM; return 0; }
 static void pin_help_fmt(const ph_ctl *c, int32_t v, wchar_t *b, int n)
@@ -201,10 +212,12 @@ static int page_rows(int pg, ph_ctl **out)
     for (int i = 0, k = ph_ctl_count(); i < k && n < MAXROWS; i++) {
         ph_ctl *c = ph_ctl_at(i);
         if (!c || c->page != pg || !row_visible(c)) continue;
-        if (c->type == CT_HEADER && n > 0 && out[n - 1]->type == CT_HEADER) n--;
+        /* an empty part goes, and an empty section when the next title is a section too */
+        if (c->type == CT_HEADER)
+            while (n > 0 && out[n - 1]->type == CT_HEADER && (!is_section(out[n - 1]) || is_section(c))) n--;
         out[n++] = c;
     }
-    if (n > 0 && out[n - 1]->type == CT_HEADER) n--;
+    while (n > 0 && out[n - 1]->type == CT_HEADER) n--;
     if (pg != PG_QUICK) return n;
     /* pinned controls follow the built-in Quick rows, in the order they were pinned;
        advanced ones stay because the user asked for them, unavailable ones do not */
@@ -284,10 +297,11 @@ static void layout(void)
     for (int i = 0; i < nrows; i++) {
         int h;
         switch (rows[i]->type) {
-        case CT_HEADER: h = i == 0 ? 30 : 40; break;
+        case CT_HEADER: h = is_section(rows[i]) ? (i == 0 ? 34 : 56) : i == 0 ? 30 : 40; break;
         case CT_SLIDER: h = two_line(i) ? 78 : 64; break;
-        case CT_INFO: h = 36; break;
+        case CT_INFO: h = is_table(rows[i]) ? 26 : 36; break;
         case CT_STATUS: h = 38; break;
+        case CT_CURVE: h = 204; break;
         default: h = two_line(i) ? 60 : 50; break;
         }
         row_y[i] = y;
@@ -420,7 +434,7 @@ static void reset_sel(void)
 {
     if (sel < 0 || sel >= nrows) return;
     ph_ctl *c = rows[sel];
-    if (!c->key || !selectable(c) || c->type == CT_ACTION || locked(c)) return;
+    if (!has_default(c) || !selectable(c) || c->type == CT_ACTION || locked(c)) return;
     if (pend == c) { pend = NULL; KillTimer(hw, TM_COMMIT); }
     if (!c->active) return;
     ph_ctl_reset(c);
@@ -500,7 +514,7 @@ void ui_hold(int src, int down)
     if (!c) return;
     if (!resettable(c)) {
         if (locked(c)) ui_toast(L"Managed by AutoTDP");
-        else if (c->key && c->type != CT_ACTION && !c->active) ui_toast(L"Already at Default");
+        else if (has_default(c) && c->type != CT_ACTION && !c->active) ui_toast(L"Already at Default");
         return;
     }
     hold_start(src, HOLD_MS);
@@ -555,6 +569,7 @@ static void confirm_close(int yes)
 static void move_sel(int d)
 {
     commit_pending();
+    cedit = NULL;
     if (!nrows) return;
     int n = sel < 0 ? first_sel(d > 0 ? 0 : nrows - 1, d) : first_sel(sel + d, d);
     if (n >= 0) sel = n;
@@ -567,6 +582,7 @@ static void move_sel(int d)
 static void switch_tab(int d)
 {
     commit_pending();
+    cedit = NULL;
     if (ntabs < 1) return;
     int idx = 0;
     for (int i = 0; i < ntabs; i++) if (tabs[i] == page) idx = i;
@@ -581,6 +597,7 @@ static void goto_tab(int idx)
 {
     if (idx < 0 || idx >= ntabs || tabs[idx] == page) return;
     commit_pending();
+    cedit = NULL;
     page = tabs[idx];
     sel = -1;
     scroll = 0;
@@ -609,7 +626,18 @@ static void adjust(int d)
         if (v < c->min || v > c->max) return;
         apply_val(c, v, 0);
         break;
+    case CT_CURVE:
+        cpt = PH_CLAMP(cpt + d, 0, FAN_PTS - 1);
+        break;
     }
+}
+
+/* up / down while a curve point is being edited */
+static void curve_step(int d)
+{
+    ph_fan *f = cedit ? cedit->ctx : NULL;
+    if (!f) return;
+    fan_curve_point(f, cpt, f->pt[cpt] + d * 5, 1);
 }
 
 static void activate(void)
@@ -627,6 +655,7 @@ static void activate(void)
         apply_val(c, v, 0);
         break;
     case CT_ACTION: apply_val(c, c->val, 0); break;
+    case CT_CURVE: cedit = cedit == c ? NULL : c; break;
     }
 }
 
@@ -644,6 +673,13 @@ void ui_nav(int a)
         case IN_OK: confirm_close(conf_btn); break;
         case IN_BACK: confirm_close(0); break;
         }
+        inval();
+        return;
+    }
+    if (cedit && cedit != cur()) cedit = NULL;
+    if (cedit && (a == IN_UP || a == IN_DOWN || a == IN_BACK)) {
+        if (a == IN_BACK) cedit = NULL;
+        else curve_step(a == IN_UP ? 1 : -1);
         inval();
         return;
     }
@@ -826,6 +862,82 @@ static void draw_cross(HDC m, int cx, int cy, COLORREF col)
 
 static COLORREF tone_color(int t) { return t == TONE_GOOD ? C_ACC : t == TONE_BAD ? C_DANGER : C_DIM; }
 
+/* ---------- fan curve graph: drawing and dragging agree on these ---------- */
+
+static void curve_box(int y, int h, RECT *g)
+{
+    g->left = S(PAD) + S(IND) + S(42);
+    g->right = pw - S(PAD) - S(8);
+    g->top = y + S(48);
+    g->bottom = y + h - S(28);
+}
+
+static int curve_x(const RECT *g, int k) { return g->left + (g->right - g->left) * k / (FAN_PTS - 1); }
+static int curve_y(const RECT *g, int pct) { return g->bottom - (g->bottom - g->top) * PH_CLAMP(pct, 0, 100) / 100; }
+
+static int temp_x(const RECT *g, int t)
+{
+    int lo = fan_point_temp(0), hi = fan_point_temp(FAN_PTS - 1);
+    return g->left + (g->right - g->left) * (PH_CLAMP(t, lo, hi) - lo) / (hi - lo);
+}
+
+static void draw_curve(HDC m, int i, int y, int h, int x0, int x1)
+{
+    ph_ctl *c = rows[i];
+    ph_fan *f = c->ctx;
+    RECT g;
+    wchar_t v[64], t[16];
+    int on = i == sel, editing = on && cedit == c;
+    curve_box(y, h, &g);
+
+    COLORREF vc = C_DIM;
+    if (f->firmware) lstrcpynW(v, L"No CPU temperature: firmware", PH_ARRAY(v));
+    else if (f->temp > 0 && f->cur >= 0) { ph_swprintf(v, PH_ARRAY(v), L"%d \x00B0" L"C  \x00B7  %d%%", f->temp, f->cur); vc = C_ACC; }
+    else lstrcpynW(v, L"Reading the CPU temperature", PH_ARRAY(v));
+    int vw = text_w(m, f_small, v);
+    text(m, f_body, C_TEXT, c->label, x0, y + S(8), x1 - vw - S(8), y + S(32), DT_LEFT);
+    text(m, f_small, vc, v, x1 - vw, y + S(8), x1, y + S(32), DT_RIGHT);
+
+    /* grid: 0 / 50 / 100 %, one line per point with its temperature under it */
+    for (int p = 0; p <= 100; p += 50) {
+        int gy = curve_y(&g, p);
+        fill(m, g.left, gy, g.right + 1, gy + 1, C_TRACK);
+        ph_swprintf(t, PH_ARRAY(t), L"%d%%", p);
+        text(m, f_small, C_FAINT, t, x0, gy - S(8), g.left - S(6), gy + S(8), DT_RIGHT);
+    }
+    for (int k = 0; k < FAN_PTS; k++) {
+        int gx = curve_x(&g, k);
+        fill(m, gx, g.top, gx + 1, g.bottom, C_ROW);
+        ph_swprintf(t, PH_ARRAY(t), L"%d\x00B0", fan_point_temp(k));
+        text(m, f_small, on && k == cpt ? C_TEXT : C_FAINT, t, gx - S(20), g.bottom + S(4), gx + S(20), g.bottom + S(22), DT_CENTER);
+    }
+    if (f->temp > 0) {
+        int tx = temp_x(&g, f->temp);
+        fill(m, tx, g.top, tx + S(2), g.bottom, C_FAINT);
+    }
+
+    POINT pt[FAN_PTS];
+    for (int k = 0; k < FAN_PTS; k++) { pt[k].x = curve_x(&g, k); pt[k].y = curve_y(&g, f->pt[k]); }
+    HPEN pen = CreatePen(PS_SOLID, S(2) > 0 ? S(2) : 1, f->on ? C_ACC : C_DIM);
+    HGDIOBJ op = SelectObject(m, pen);
+    Polyline(m, pt, FAN_PTS);
+    SelectObject(m, op);
+    DeleteObject(pen);
+    for (int k = 0; k < FAN_PTS; k++) {
+        int cur_pt = on && k == cpt;
+        if (cur_pt) circle(m, pt[k].x, pt[k].y, S(9), editing ? C_ACC : C_TEXT);
+        circle(m, pt[k].x, pt[k].y, S(5), cur_pt ? C_SEL : C_ACC);
+    }
+    if (on) {
+        ph_swprintf(t, PH_ARRAY(t), L"%d%%", f->pt[cpt]);
+        int tx = pt[cpt].x, ty = pt[cpt].y - S(22);
+        if (ty < g.top - S(14)) ty = pt[cpt].y + S(8);
+        text(m, f_small, editing ? C_ACC : C_TEXT, t, tx - S(24), ty, tx + S(24), ty + S(16), DT_CENTER);
+    }
+    /* where the fan is now */
+    if (f->temp > 0 && f->cur >= 0) circle(m, temp_x(&g, f->temp), curve_y(&g, f->cur), S(4), C_TEXT);
+}
+
 static void draw_status(HDC m, int i, int y, int h, int x0, int x1)
 {
     ph_ctl *c = rows[i];
@@ -839,6 +951,16 @@ static void draw_status(HDC m, int i, int y, int h, int x0, int x1)
     text(m, tone == TONE_DIM ? f_small : f_body, col, t, x0, y, x1, y + h, DT_LEFT);
 }
 
+/* the bar along the bottom of a row held towards Default */
+static void draw_hold(HDC m, int i, int y, int h)
+{
+    int p = i == sel ? hold_progress() : -1;
+    if (p < 0) return;
+    int l = S(18), r = pw - S(18), by = y + h - S(7);
+    rrect(m, l, by, r, by + S(3), S(3), C_TRACK);
+    rrect(m, l, by, l + (int)((int64_t)(r - l) * p / 1000), by + S(3), S(3), C_ACC);
+}
+
 static void draw_row(HDC m, int i, int y)
 {
     ph_ctl *c = rows[i];
@@ -847,11 +969,27 @@ static void draw_row(HDC m, int i, int y)
     wchar_t v[128], sub[160];
     row_vx[i] = x1;
     if (c->type == CT_HEADER) {
-        text(m, f_small, C_ACC, c->label, x0, y + h - S(24), x1, y + h - S(4), DT_LEFT);
+        if (is_section(c)) {
+            if (i > 0) fill(m, S(PAD), y + S(12), pw - S(PAD), y + S(13), C_ROW);
+            text(m, f_bold, C_TEXT, c->label, S(PAD), y + h - S(30), x1, y + h - S(6), DT_LEFT);
+        } else {
+            text(m, f_small, C_ACC, c->label, x0, y + h - S(24), x1, y + h - S(4), DT_LEFT);
+        }
+        return;
+    }
+    if (is_table(c)) {
+        if (i & 1) fill(m, S(8), y, pw - S(8), y + h, C_ZEBRA);
+        value_text(i, v, PH_ARRAY(v));
+        int iw = v[0] ? text_w(m, f_small, v) : 0;
+        int vx = x1 - iw;
+        if (vx < x0 + (x1 - x0) / 3) vx = x0 + (x1 - x0) / 3;
+        text(m, f_small, C_DIM, c->label, x0, y, vx - S(8), y + h, DT_LEFT);
+        text(m, f_small, C_TEXT, v, vx, y, x1, y + h, DT_RIGHT);
         return;
     }
     if (i == sel) rrect(m, S(8), y + S(2), pw - S(8), y + h - S(2), S(12), C_SEL);
     if (c->type == CT_STATUS) { draw_status(m, i, y, h, x0, x1); return; }
+    if (c->type == CT_CURVE) { draw_curve(m, i, y, h, x0, x1); draw_hold(m, i, y, h); return; }
     COLORREF lc = lk ? C_FAINT : (c->flags & CF_DANGER) ? C_DANGER : C_TEXT;
     COLORREF vc = value_text(i, v, PH_ARRAY(v));
     int vw = v[0] ? text_w(m, f_body, v) : 0;
@@ -947,12 +1085,7 @@ static void draw_row(HDC m, int i, int y)
     }
     }
 
-    int p = i == sel ? hold_progress() : -1;
-    if (p >= 0) {
-        int l = S(18), r = pw - S(18), by = y + h - S(7);
-        rrect(m, l, by, r, by + S(3), S(3), C_TRACK);
-        rrect(m, l, by, l + (int)((int64_t)(r - l) * p / 1000), by + S(3), S(3), C_ACC);
-    }
+    draw_hold(m, i, y, h);
 }
 
 static void draw_close(HDC m)
@@ -1075,6 +1208,9 @@ static void render(HDC m)
     ph_ctl *c = cur();
     int pin = c && ph_ctl_pinnable(c), pinned = pin && pin_has(c->key);
     if (conf) hint = L"A confirms  \x00B7  B cancels";
+    else if (c && c->type == CT_CURVE && cedit == c) hint = L"Up / Down: fan speed  \x00B7  A or B: done";
+    else if (c && c->type == CT_CURVE && hold_progress() < 0)
+        hint = resettable(c) ? L"Left / Right: point  \x00B7  A: edit  \x00B7  Hold X: Default" : L"Left / Right: point  \x00B7  A: edit";
     else if (c && locked(c)) hint = L"Locked while AutoTDP runs";
     else if (hold_progress() >= 0) hint = L"Keep holding to restore Default";
     else if (resettable(c) && pin) hint = pinned ? L"Hold X or R: Default  \x00B7  Y unpins" : L"Hold X or R: Default  \x00B7  Y pins";
@@ -1189,6 +1325,7 @@ void ui_show(int show)
         if (!vis) return;
         commit_pending();
         conf = NULL;
+        cedit = NULL;
         drag = DR_NONE;
         if (GetCapture() == hw) ReleaseCapture();
         hold_end();
@@ -1364,6 +1501,33 @@ static int on_pin(int i, int x, int y)
     return x < S(PAD) + S(PIN_HIT) && !in_track(i, y) && ph_ctl_pinnable(rows[i]);
 }
 
+/* the graph of a curve row; above it is the row's label line */
+static int in_graph(int i, int y)
+{
+    return rows[i]->type == CT_CURVE && y >= top_y() + row_y[i] - scroll + S(40);
+}
+
+/* touch and mouse: the point nearest the press follows the finger up and down */
+static void curve_drag(int i, int y, int save)
+{
+    RECT g;
+    ph_fan *f = rows[i]->ctx;
+    curve_box(top_y() + row_y[i] - scroll, row_h[i], &g);
+    if (g.bottom <= g.top) return;
+    int pct = (g.bottom - y) * 100 / (g.bottom - g.top);
+    pct = (PH_CLAMP(pct, 0, 100) + 2) / 5 * 5;
+    fan_curve_point(f, cpt, pct, save);
+    inval();
+}
+
+static void curve_pick(int i, int x)
+{
+    RECT g;
+    curve_box(top_y() + row_y[i] - scroll, row_h[i], &g);
+    int w = g.right - g.left;
+    if (w > 0) cpt = PH_CLAMP(((x - g.left) * (FAN_PTS - 1) + w / 2) / w, 0, FAN_PTS - 1);
+}
+
 /* a press that moves further than this is no longer a tap or a hold */
 static int moved(int x, int y)
 {
@@ -1390,7 +1554,12 @@ static void press(int x, int y, int hold)
     if (conf) { down_row = -1; drag = DR_NONE; inval(); return; }
     sel = i;
     ph_ctl *c = rows[i];
-    if (on_pin(i, x, y)) {
+    if (in_graph(i, y)) {
+        drag = DR_CURVE;
+        cedit = NULL;
+        curve_pick(i, x);
+        curve_drag(i, y, 0);
+    } else if (on_pin(i, x, y)) {
         /* the pin reacts to a tap; holding it does not reset anything */
     } else if (c->type == CT_SLIDER && !locked(c) && in_track(i, y)) {
         drag = DR_SLIDER;
@@ -1405,6 +1574,7 @@ static void press(int x, int y, int hold)
 static void move(int x, int y)
 {
     if (drag == DR_SLIDER && sel >= 0 && sel < nrows) { slider_to(sel, x); return; }
+    if (drag == DR_CURVE && sel >= 0 && sel < nrows) { curve_drag(sel, y, 0); return; }
     /* sliding sideways cancels the tap and the hold; up or down scrolls the list */
     if ((drag == DR_TAP || drag == DR_CANCEL) && moved(x, y)) {
         hold_stop(HOLD_PTR);
@@ -1461,8 +1631,19 @@ static void release(int x, int y)
     int d = drag;
     drag = DR_NONE;
     if (d == DR_SLIDER) commit_pending();
+    else if (d == DR_CURVE && sel >= 0 && sel < nrows) curve_drag(sel, y, 1);
     else if (d == DR_TAP && !held && !moved(x, y)) tap(down_x, down_y);   /* acts on what was pressed */
     inval();
+}
+
+/* a drag that ended without its release: keep the curve as it is now */
+static void curve_save(void)
+{
+    ph_ctl *c = cur();
+    if (c && c->type == CT_CURVE) {
+        ph_fan *f = c->ctx;
+        fan_curve_point(f, cpt, f->pt[cpt], 1);
+    }
 }
 
 static void pt_client(LPARAM l, int *x, int *y)
@@ -1515,6 +1696,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_CAPTURECHANGED:
         if ((HWND)l != h && drag != DR_NONE) {
             if (drag == DR_SLIDER) commit_pending();
+            if (drag == DR_CURVE) curve_save();
             drag = DR_NONE;
             hold_stop(HOLD_PTR);
         }
@@ -1543,6 +1725,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0;
     case WM_POINTERCAPTURECHANGED:
         if (drag == DR_SLIDER) commit_pending();
+        if (drag == DR_CURVE) curve_save();
         drag = DR_NONE;
         hold_stop(HOLD_PTR);
         return 0;

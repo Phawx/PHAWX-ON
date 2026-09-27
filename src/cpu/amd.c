@@ -213,13 +213,25 @@ static void cppc_init(void)
            cpu_clk.min_mhz, cpu_clk.max_mhz);
 }
 
+/* also for fan curves, which read it while the overlay is closed */
+static int read_temp(int *c)
+{
+    float f;
+    if (smu_pm_ok() && !smu_pm_refresh() && !smu_pm_get(PM_TCTL_VAL, &f) && f > 0.0f && f < 125.0f) {
+        *c = (int)(f + 0.5f);
+        return 0;
+    }
+    return smu_tctl(c);     /* no PM table (Van Gogh, Mendocino...) */
+}
+
 static void sample(void)
 {
     float f;
+    int t;
+    temp_c = read_temp(&t) == 0 ? t : -1;
     if (!smu_pm_ok()) return;
     smu_pm_refresh();
     pwr_mw = smu_pm_get(PM_FAST_VAL, &f) == 0 && f >= 0.0f && f < 400.0f ? (int32_t)(f * 1000.0f) : -1;
-    temp_c = smu_pm_get(PM_TCTL_VAL, &f) == 0 && f > 0.0f && f < 125.0f ? (int32_t)(f + 0.5f) : -1;
 }
 
 static void fmt_power(const ph_ctl *c, int32_t v, wchar_t *b, int n)
@@ -318,8 +330,10 @@ static void limits_init(void)
     if (!smu_has(S_TCTL_TEMP)) hide(C_TCTL);
     if (!smu_has(S_STAPM_TIME)) hide(C_STAPMT);
     if (!smu_has(S_SLOW_TIME)) hide(C_SLOWT);
-    if (!smu_pm_ok()) { hide(C_PWR); hide(C_TEMP); }
-    if (!smu_has(S_STAPM_LIMIT) && !smu_has(S_TCTL_TEMP) && !smu_pm_ok()) hide(C_HDR);
+    int t;
+    if (!smu_pm_ok()) hide(C_PWR);
+    if (read_temp(&t)) hide(C_TEMP);
+    if (!smu_has(S_STAPM_LIMIT) && !smu_has(S_TCTL_TEMP) && !smu_pm_ok() && (ctls[C_TEMP].flags & CF_HIDDEN)) hide(C_HDR);
 
     gfx_hi = fam == AF_LUCIENNE ? 2000 : 1600;
     gpu_clk.max_mhz = gfx_hi;
@@ -355,6 +369,8 @@ static int amd_init(void)
     cppc_init();
     if (ctls[C_CPB].flags & CF_HIDDEN) hide(C_CLKHDR);
     sample();
+    int t;
+    if (read_temp(&t) == 0) ph_set_cpu_temp_reader(read_temp);
     ph_register_ctls(ctls, C_N);
     return 0;
 }

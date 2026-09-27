@@ -455,18 +455,19 @@ static ph_ctl ctls[] = {
     SL("cpu.het_pinit", L"P-core initial perf", PG_CPU, 326, ADV, 0, 100, 5, 100, L"%", fmt_pct, M_HC1, A_HYB),
     SL("cpu.het_efloor", L"E-core floor perf", PG_CPU, 327, ADV, 0, 100, 5, 0, L"%", fmt_pct, M_HC0, A_HYB),
 
-    HD(L"Processor power", PG_POWER, 100, 0, 0),
-    SL("power.minstate", L"Min processor state", PG_POWER, 101, OPT, 0, 100, 5, 5, L"%", fmt_pct, M_THRMIN, 0),
-    SL("power.maxstate", L"Max processor state", PG_POWER, 102, OPT, 0, 100, 5, 100, L"%", fmt_pct, M_THRMAX, 0),
+    /* the first section of the System page */
+    HD(L"Power", PG_SYSTEM, 10, CF_SECTION, 0),
+    SL("power.minstate", L"Min processor state", PG_SYSTEM, 11, OPT, 0, 100, 5, 5, L"%", fmt_pct, M_THRMIN, 0),
+    SL("power.maxstate", L"Max processor state", PG_SYSTEM, 12, OPT, 0, 100, 5, 100, L"%", fmt_pct, M_THRMAX, 0),
 
-    HD(L"Processor tuning", PG_POWER, 110, CF_ADVANCED, 0),
-    TG("power.autonomous", L"Autonomous mode", PG_POWER, 111, ADV, 1, M_AUTO, 0),
-    SL("power.autowindow", L"Autonomous window", PG_POWER, 112, ADV, 0, 100000, 1000, 0, NULL, fmt_us, M_AWIN, 0),
-    TG("power.dutycycle", L"Duty cycling", PG_POWER, 113, ADV, 1, M_DUTY, 0),
-    SL("power.boostpol", L"Boost policy", PG_POWER, 114, ADV, 0, 100, 5, 60, L"%", fmt_pct, M_BOOSTPOL, 0),
-    SL("power.lathint_perf", L"Latency hint perf", PG_POWER, 115, ADV, 0, 100, 5, 99, L"%", fmt_pct, M_LATP, 0),
-    SL("power.lathint_unpark", L"Latency hint unpark", PG_POWER, 116, ADV, 0, 100, 5, 100, L"%", fmt_pct, M_LATU, 0),
-    SL("power.perfcheck", L"Perf check interval", PG_POWER, 117, ADV, 5, 100, 5, 30, NULL, fmt_ms, M_PCHK, 0),
+    HD(L"Processor tuning", PG_SYSTEM, 20, CF_ADVANCED, 0),
+    TG("power.autonomous", L"Autonomous mode", PG_SYSTEM, 21, ADV, 1, M_AUTO, 0),
+    SL("power.autowindow", L"Autonomous window", PG_SYSTEM, 22, ADV, 0, 100000, 1000, 0, NULL, fmt_us, M_AWIN, 0),
+    TG("power.dutycycle", L"Duty cycling", PG_SYSTEM, 23, ADV, 1, M_DUTY, 0),
+    SL("power.boostpol", L"Boost policy", PG_SYSTEM, 24, ADV, 0, 100, 5, 60, L"%", fmt_pct, M_BOOSTPOL, 0),
+    SL("power.lathint_perf", L"Latency hint perf", PG_SYSTEM, 25, ADV, 0, 100, 5, 99, L"%", fmt_pct, M_LATP, 0),
+    SL("power.lathint_unpark", L"Latency hint unpark", PG_SYSTEM, 26, ADV, 0, 100, 5, 100, L"%", fmt_pct, M_LATU, 0),
+    SL("power.perfcheck", L"Perf check interval", PG_SYSTEM, 27, ADV, 5, 100, 5, 30, NULL, fmt_ms, M_PCHK, 0),
 };
 
 /* ---------- Windows frequency cap clock domain ---------- */

@@ -118,7 +118,8 @@ extern "C" {
 #define PHX_ERROR      (-1)   /* failed; call host->set_status first to say why. Any value other than 0 and 1 counts as failed */
 #define PHX_E_VERSION  (-2)   /* this Phawx ON is too old: "Not running · needs a newer Phawx ON" */
 
-/* pages of the overlay */
+/* pages of the overlay. There is no Power tab any more: PHX_PAGE_POWER rows are shown
+   on the System page, like PHX_PAGE_SYSTEM ones. */
 enum {
     PHX_PAGE_QUICK = 0, PHX_PAGE_CPU, PHX_PAGE_POWER, PHX_PAGE_GPU,
     PHX_PAGE_DISPLAY, PHX_PAGE_SYSTEM, PHX_PAGE_PLUGINS
@@ -217,12 +218,14 @@ struct phx_clock {
 };
 
 /* ---------- fans ----------
- * You provide the hardware access, the host provides the rows on the System page
- * (Fan mode: Default / Auto / Manual / Full speed, a Manual fan speed slider, the
- * RPM) under the keys "<plugin>.<id>.mode" and ".speed". It calls set_auto when
- * the user picks Auto or Default, and at exit and after a crash elsewhere if it
- * had set a duty; it does not call a plugin that crashed itself. Limit: 4 fans
- * per plugin.
+ * You provide the hardware access, the host provides the rows in the System page's
+ * Fan control section (Fan mode: Default / Auto / Manual / Full speed / Curve, a
+ * Manual fan speed slider, the fan curve graph, the RPM) under the keys
+ * "<plugin>.<id>.mode" and ".speed", and ".curve" for the curve. In Curve mode the
+ * host calls set_duty about once a second on the UI thread, from the CPU
+ * temperature, and set_auto when it has no temperature. It calls set_auto when the
+ * user picks Auto or Default, and at exit and after a crash elsewhere if it had set
+ * a duty; it does not call a plugin that crashed itself. Limit: 4 fans per plugin.
  */
 struct phx_fan {
     uint32_t size;                    /* sizeof(phx_fan), at least PHX_FAN_SIZE_V1 */

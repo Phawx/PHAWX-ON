@@ -151,8 +151,10 @@ static const fan_def fan_gpd_mini_acpi = {
 static const fan_def *fan;
 static int fan_touched;
 
-enum { FM_AUTO, FM_MANUAL, FM_FULL };
-static const wchar_t *const fan_modes[] = { L"Auto", L"Manual", L"Full speed", NULL };
+/* Curve is last so saved modes from before it keep their meaning */
+enum { FM_AUTO, FM_MANUAL, FM_FULL, FM_CURVE };
+static const wchar_t *const fan_modes[] = { L"Auto", L"Manual", L"Full speed", L"Curve", NULL };
+static ph_fan curve;
 
 enum { F_HDR, F_MODE, F_SPEED, F_RPM, F_N };
 static ph_ctl fan_ctls[F_N];
@@ -183,9 +185,14 @@ static int fan_apply(int mode, int pct)
     return fan_write_duty(mode == FM_FULL ? 100 : pct);
 }
 
+static int curve_duty(ph_fan *f, int pct) { (void)f; return fan_write_duty(pct); }
+static int curve_auto(ph_fan *f) { (void)f; return fan_apply(FM_AUTO, 0); }
+
 static int set_mode(ph_ctl *c, int32_t v)
 {
     (void)c;
+    fan_curve_use(&curve, v == FM_CURVE);
+    if (v == FM_CURVE) return 0;      /* fans_tick sets the duty from here on */
     return fan_apply(v, fan_ctls[F_SPEED].val);
 }
 
@@ -193,6 +200,7 @@ static int set_mode(ph_ctl *c, int32_t v)
 static void release_mode(ph_ctl *c)
 {
     (void)c;
+    fan_curve_use(&curve, 0);
     if (fan && fan_touched) fan_apply(FM_AUTO, 0);
 }
 
@@ -223,16 +231,19 @@ static int fan_init(const dev_def *d)
         if (a == 0xFF && b == 0xFF) return -1;
     }
     uint16_t fl = CF_OPTIONAL | CF_REAPPLY | CF_PROFILE | d->flags;
-    fan_ctls[F_HDR] = (ph_ctl){ .key = NULL, .label = d->name, .type = CT_HEADER, .page = PG_SYSTEM, .order = 200, .flags = d->flags };
+    /* the first fan of the Fan control section (100) */
+    fan_ctls[F_HDR] = (ph_ctl){ .key = NULL, .label = d->name, .type = CT_HEADER, .page = PG_SYSTEM, .order = 110, .flags = d->flags };
     fan_ctls[F_MODE] = (ph_ctl){ .key = "dev.fanmode", .label = L"Fan mode", .type = CT_CHOICE, .page = PG_SYSTEM,
-                                 .order = 201, .flags = fl, .choices = fan_modes, .set = set_mode, .release = release_mode };
+                                 .order = 111, .flags = fl, .choices = fan_modes, .set = set_mode, .release = release_mode };
     fan_ctls[F_SPEED] = (ph_ctl){ .key = "dev.fanspeed", .label = L"Manual fan speed", .type = CT_SLIDER, .page = PG_SYSTEM,
-                                  .order = 202, .flags = (uint16_t)(CF_PROFILE | d->flags), .min = 10, .max = 100, .step = 5,
+                                  .order = 112, .flags = (uint16_t)(CF_PROFILE | d->flags), .min = 10, .max = 100, .step = 5,
                                   .def = 50, .unit = L"%", .fmt = fmt_pct, .set = set_speed };
-    fan_ctls[F_RPM] = (ph_ctl){ .key = NULL, .label = L"Fan speed", .type = CT_INFO, .page = PG_SYSTEM, .order = 203,
+    fan_ctls[F_RPM] = (ph_ctl){ .key = NULL, .label = L"Fan speed", .type = CT_INFO, .page = PG_SYSTEM, .order = 114,
                                 .flags = d->flags, .unit = L"RPM", .get = get_rpm };
     if (!fan->reg_rpm_hi) fan_ctls[F_RPM].flags |= CF_HIDDEN;
     ph_register_ctls(fan_ctls, F_N);
+    curve = (ph_fan){ .name = d->name, .min_pct = 10, .duty = curve_duty, .autom = curve_auto };
+    fan_curve_add(&curve, "dev.fancurve", 113, d->flags);
     return 0;
 }
 

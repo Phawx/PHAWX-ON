@@ -1,7 +1,7 @@
 #include "phawx.h"
 
 extern ph_backend bk_drv, bk_intel, bk_amd, bk_winpower, bk_nvidia, bk_amdgpu,
-    bk_intelgpu, bk_display, bk_tweaks, bk_devices;
+    bk_intelgpu, bk_display, bk_tweaks, bk_devices, bk_hwinfo;
 
 ph_backend *const ph_backends[] = {
     &bk_drv,
@@ -14,11 +14,12 @@ ph_backend *const ph_backends[] = {
     &bk_display,
     &bk_tweaks,
     &bk_devices,
-    &bk_plugins,    /* last: plugins may look at what the built-ins registered */
+    &bk_plugins,    /* plugins may look at what the built-ins registered */
+    &bk_hwinfo,     /* last: its table shows the sensors everyone else registered */
     NULL
 };
 
-#define MAX_CTLS 512
+#define MAX_CTLS 1024
 #define MAX_CLK  8
 
 static ph_ctl *ctls[MAX_CTLS];
@@ -116,7 +117,7 @@ void ph_apply_all(int reapply_only)
     for (int i = 0; i < nctls; i++) {
         ph_ctl *c = ctls[i];
         if (!c->active || !c->set || (c->flags & CF_HIDDEN)) continue;
-        if (c->type == CT_ACTION || c->type == CT_INFO || c->type == CT_HEADER) continue;
+        if (c->type == CT_ACTION || c->type == CT_INFO || c->type == CT_HEADER || c->type == CT_CURVE) continue;
         if (reapply_only && !(c->flags & CF_REAPPLY)) continue;
         if ((c->flags & CF_AUTOTDP) && autotdp_running()) continue;
         L();

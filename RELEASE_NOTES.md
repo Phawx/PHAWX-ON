@@ -1,3 +1,15 @@
+Phawx ON 1.2
+
+New
+- **System page sections.** The Power tab is now the Power section of the System page, followed by Fan control, Lighting, Windows, a section for each plugin, and Hardware info.
+- **Fan curves.** Fan mode has a new **Curve** setting for the GPD Win Mini fan and for plugin fans. Draw the fan speed against the CPU temperature on a graph (7 points, 30–90 °C) by dragging the points, or pick a point with left/right and press A to change it with up/down. Phawx ON follows the curve about once a second, always runs the fan at 100 % from 95 °C, and hands the fan back to the firmware if it cannot read the temperature.
+- **Lighting section.** RGB lights from plugins are grouped in their own section.
+- **Hardware info.** A table at the end of the System page lists everything Phawx ON can read: system, BIOS and Windows, CPU name, cores, load, clock, power and temperature, memory, GPU readings, display mode, fan speeds, power source and battery, and the state of PawnIO and PresentMon.
+
+Changed
+- AMD APUs without a power table (Van Gogh, Mendocino and others) now show their temperature, read from the SMN thermal register, on the CPU page and for fan curves.
+- Plugins: rows on `PHX_PAGE_POWER` are shown on the System page. On System each plugin gets a section of its own.
+
 Phawx ON 1.1.1
 
 Fixed in 1.1.1

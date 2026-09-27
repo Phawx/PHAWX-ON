@@ -25,6 +25,7 @@ uint32_t smu_version(void);
 int      smu_has(int s);
 int      smu_set(int s, uint32_t v);       /* 0 ok, 1 unsupported by firmware, -1 failed */
 int      smu_pm_ok(void);
+int      smu_tctl(int *celsius);     /* Tctl from the SMN thermal register, without the PM table */
 int      smu_pm_refresh(void);
 int      smu_pm_get(int field, float *v);
 

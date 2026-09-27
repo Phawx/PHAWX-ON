@@ -1,6 +1,6 @@
 # Phawx ON
 
-Phawx ON is a small, open-source performance tuning app for Windows handhelds and laptops. It is a native C tray app of about 310 KB (PawnIO modules included) with no runtime dependencies. It adds a Steam Deck–style quick-access overlay where you set TDP, EPP, CPU and GPU clocks, and hybrid P/E core behaviour. It also has an **AutoTDP** mode that holds a target frame rate at the lowest CPU and GPU clocks that still reach it.
+Phawx ON is a small, open-source performance tuning app for Windows handhelds and laptops. It is a native C tray app of about 320 KB (PawnIO modules included) with no runtime dependencies. It adds a Steam Deck–style quick-access overlay where you set TDP, EPP, CPU and GPU clocks, and hybrid P/E core behaviour. It also has an **AutoTDP** mode that holds a target frame rate at the lowest CPU and GPU clocks that still reach it.
 
 It is built to be a good citizen:
 
@@ -17,9 +17,12 @@ See [docs/FEATURES.md](docs/FEATURES.md) in the repository for the full feature 
 
 ## Features
 
-- **Overlay.** Slides in from the right edge, and gamepad, touch and mouse all work in it. The header reads **Phawx ON** (green) while AutoTDP runs and **Phawx OFF** otherwise, with live FPS and clocks below it. Pages: Quick, CPU, Power, GPU, Display, System, Plugins, Settings.
+- **Overlay.** Slides in from the right edge, and gamepad, touch and mouse all work in it. The header reads **Phawx ON** (green) while AutoTDP runs and **Phawx OFF** otherwise, with live FPS and clocks below it. Pages: Quick, CPU, GPU, Display, System, Plugins, Settings. System has the sections Power, Fan control, Lighting, Windows and Hardware info.
 - **Pins.** Every setting and action has a pin, except those on the Quick page itself and the Plugins page's own switches and links. Pinned ones appear on the Quick page, below its own rows.
 - **Hold to reset.** Hold X or R on a setting for half a second (or touch and hold it for 2 seconds) to put it back to Default.
+- **Fan control.** Auto, Manual, Full speed or **Curve** for the built-in GPD Win Mini fan and for plugin fans. In Curve mode you draw the fan speed against the CPU temperature on a graph.
+- **Lighting.** RGB lights from plugins: off, solid colour or the plugin's effects, colour and brightness.
+- **Hardware info.** A table of everything Phawx ON can read: system, BIOS and Windows version, CPU, load, power and temperature, memory, GPU clocks, load, power and temperature, display mode, fan speeds, battery, and the state of PawnIO and PresentMon.
 - **Plugins.** DLLs in a `plugins` folder add controls, clock domains, fans and RGB lights. The Plugins page also shows whether PawnIO and PresentMon are installed and running. A RyzenAdj plugin is included. The plugin guide is [docs/PLUGINS.md](docs/PLUGINS.md) in the repository and `sdk\PLUGINS.md` in the release zip.
 - **TDP.**
   - Intel: PL1/PL2 and their time windows, through MSR 0x610 with the real power units.
@@ -63,7 +66,7 @@ See [docs/FEATURES.md](docs/FEATURES.md) in the repository for the full feature 
 
 ## Install
 
-1. Download `PhawxON-1.1.1.zip` from [Releases](https://github.com/Phawx/PHAWX-ON/releases).
+1. Download the latest `PhawxON-<version>.zip` from [Releases](https://github.com/Phawx/PHAWX-ON/releases).
 2. Extract it to **`C:\Program Files\`**. The zip contains a `PhawxON` folder, so the app ends up in `C:\Program Files\PhawxON\PhawxON.exe`. "Start with Windows" and plugins only work under Program Files, because an app that runs elevated must never load anything from a folder that normal users can write to.
 3. Install PawnIO, and PresentMon if you want AutoTDP (see above).
 4. Run `PhawxON.exe`.
@@ -100,6 +103,7 @@ The overlay never takes focus from the game.
 | LB / RB | Tap a tab | Switch page |
 | Hold X (the left face button) or R on the keyboard, about half a second | Touch and hold for 2 seconds (mouse: half a second) | Reset the setting to **Default** (Phawx ON stops managing it). A bar under the row shows the progress. |
 | Y (the top face button) | Tap the pin at the left of the row (on a slider, on its label line) | Pin the setting to the Quick page, or unpin it |
+| On a fan curve: left/right picks a point, A starts editing it, up/down change it by 5 %, A or B ends | Drag a point up or down | Edit the fan curve |
 | B | - | Close the menu |
 
 Holding only resets saved settings. On a setting that is already at Default it just says *Already at Default*, and on a row locked by AutoTDP *Managed by AutoTDP*. On actions, links and the plugin switches a long press is an ordinary tap. A touch or click that moves more than about 10 pixels is not a tap or a hold: moving up or down scrolls, moving sideways cancels. Windows' own press-and-hold ring, pen feedback and flicks are turned off in the overlay.
@@ -107,6 +111,18 @@ Holding only resets saved settings. On a setting that is already at Default it j
 Changes take effect about half a second after you stop adjusting. Settings marked dangerous ask for confirmation first. Advanced options are hidden until you turn on **Settings → Show advanced options**.
 
 The overlay never takes keyboard focus from the game, so while it is open Phawx ON watches the R key without taking it: the game sees R too. AutoTDP is turned on and off with the **Phawx ON** switch at the top of the Quick page, or from the tray icon.
+
+### System page
+
+- **Power:** Windows' minimum and maximum processor state, plus (advanced) autonomous mode, duty cycling, boost policy and latency hints. This used to be the Power tab.
+- **Fan control:** every fan Phawx ON or a plugin can drive. **Fan mode** is Default (the firmware decides), Auto, Manual (the **Manual fan speed** slider), Full speed or **Curve**.
+  - In **Curve** a graph appears with 7 points, the fan speed at 30, 40 ... 90 °C. Drag a point, or use the gamepad as in the table above. Moving a point drags its neighbours along so the curve always rises. The current temperature and speed are marked on the graph.
+  - About once a second Phawx ON sets the fan from the CPU temperature (Intel package temperature, AMD Tctl, read through PawnIO). Between points it interpolates; at 95 °C or more the fan always runs at 100 %. It speeds up at once and slows down by at most 5 % a second, so it does not hunt.
+  - Without a temperature for 5 seconds the fan goes back to the firmware until readings return. At exit, and after a crash, the firmware gets the fan back as with the other modes.
+  - Hold X on the graph to go back to the default curve. The curve is saved in `phawx.ini` and is the same for every game.
+- **Lighting:** RGB lights from plugins. Shown only when a plugin adds some.
+- **Windows:** Game Mode, Game Bar capture and the other Windows options.
+- **Hardware info:** a read-only table, refreshed about once a second while the overlay is open. It lists what the CPU, GPU, display and plugin backends read, plus system, memory, battery and software information. Sensors that are not available on your machine are left out.
 
 ### Pins
 

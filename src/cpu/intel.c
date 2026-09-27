@@ -169,6 +169,15 @@ static void fmt_locked(const ph_ctl *c, int32_t v, wchar_t *b, int n)
     lstrcpynW(b, L"Locked by firmware", n);
 }
 
+/* for fan curves: read now, the overlay's tick only samples while it is open */
+static int read_temp(int *c)
+{
+    uint64_t v;
+    if (drv_rdmsr(MSR_PKG_THERM, &v) || !(v & (1ull << 31))) return -1;
+    *c = tjmax - (int)((v >> 16) & 0x7F);
+    return 0;
+}
+
 static int get_power(ph_ctl *c, int32_t *out) { *out = pkg_mw; return pkg_mw < 0 ? -1 : 0; }
 static int get_temp(ph_ctl *c, int32_t *out) { *out = pkg_temp; return pkg_temp < 0 ? -1 : 0; }
 
@@ -202,17 +211,21 @@ static int intel_probe(void) { return g_plat.vendor == VENDOR_INTEL; }
 
 static int intel_init(void)
 {
-    uint64_t u, lim, info = 0, tt;
-    if (!drv_ok() || drv_rdmsr(MSR_RAPL_UNIT, &u) || drv_rdmsr(MSR_PKG_LIMIT, &lim)) return 0;
+    uint64_t u, lim, info = 0, tt, t;
+    if (!drv_ok()) return 0;
+    if (!drv_rdmsr(MSR_TEMP_TARGET, &tt)) {
+        int tj = (int)((tt >> 16) & 0xFF);
+        if (tj >= 60 && tj <= 130) tjmax = tj;
+    }
+    /* fan curves need the temperature even where the power limit cannot be read */
+    int have_temp = !drv_rdmsr(MSR_PKG_THERM, &t);
+    if (have_temp) ph_set_cpu_temp_reader(read_temp);
+    if (drv_rdmsr(MSR_RAPL_UNIT, &u) || drv_rdmsr(MSR_PKG_LIMIT, &lim)) return 0;
     pwr_unit = (int)(u & 0xF);
     energy_unit = (int)((u >> 8) & 0x1F);
     time_unit = (int)((u >> 16) & 0xF);
     orig_limit = lim;
     wrote = 0;
-    if (!drv_rdmsr(MSR_TEMP_TARGET, &tt)) {
-        int t = (int)((tt >> 16) & 0xFF);
-        if (t >= 60 && t <= 130) tjmax = t;
-    }
     drv_rdmsr(MSR_PKG_INFO, &info);
 
     int32_t pl1 = raw_to_mw(lim), pl2 = raw_to_mw(lim >> PL2_SHIFT);
@@ -243,8 +256,7 @@ static int intel_init(void)
         ctls[C_TW2].flags |= CF_HIDDEN;
         ctls[C_LOCK].flags &= (uint16_t)~CF_HIDDEN;
     }
-    uint64_t t;
-    if (drv_rdmsr(MSR_PKG_THERM, &t)) ctls[C_TEMP].flags |= CF_HIDDEN;
+    if (!have_temp) ctls[C_TEMP].flags |= CF_HIDDEN;
     if (drv_rdmsr(MSR_PKG_ENERGY, &t)) ctls[C_PWR].flags |= CF_HIDDEN;
 
     sample();

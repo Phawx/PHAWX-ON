@@ -236,6 +236,19 @@ int smu_family(void) { return fam; }
 uint32_t smu_version(void) { return ver; }
 int smu_pm_ok(void) { return pm_ok; }
 
+/* THM_TCON_CUR_TMP, as Linux k10temp reads it: bits 31:21 in 1/8 °C, and a
+   -49 °C range when bit 19 or both of bits 17:16 are set */
+int smu_tctl(int *c)
+{
+    uint32_t r;
+    if (smn_rd(0x00059800u, &r)) return -1;
+    int mc = (int)(r >> 21) * 125;
+    if ((r & (1u << 19)) || (r & (3u << 16)) == (3u << 16)) mc -= 49000;
+    if (mc <= 0 || mc >= 125000) return -1;
+    *c = (mc + 500) / 1000;
+    return 0;
+}
+
 int smu_has(int s)
 {
     if (!mb || fam == AF_UNKNOWN) return 0;

@@ -15,10 +15,10 @@
 #define PH_APPNAME_W L"Phawx ON"
 
 /* ---------- pages shown in the overlay ---------- */
+/* Windows power settings, fans, lights and hardware info are sections of System */
 enum {
     PG_QUICK,
     PG_CPU,
-    PG_POWER,
     PG_GPU,
     PG_DISPLAY,
     PG_SYSTEM,
@@ -28,8 +28,9 @@ enum {
 };
 
 /* ---------- controls: every tunable is one of these ---------- */
-/* CT_STATUS: full-width line; get() returns its tone (TONE_*), fmt() its text */
-enum { CT_SLIDER, CT_TOGGLE, CT_CHOICE, CT_ACTION, CT_INFO, CT_HEADER, CT_STATUS };
+/* CT_STATUS: full-width line; get() returns its tone (TONE_*), fmt() its text.
+   CT_CURVE: a fan curve graph (fans.c); ctx is its ph_fan, it has no config key. */
+enum { CT_SLIDER, CT_TOGGLE, CT_CHOICE, CT_ACTION, CT_INFO, CT_HEADER, CT_STATUS, CT_CURVE };
 enum { TONE_DIM, TONE_GOOD, TONE_BAD };
 
 enum {
@@ -45,7 +46,9 @@ enum {
     CF_SIGNED    = 1 << 9,  /* display with explicit sign */
     CF_FLICKER   = 1 << 10, /* screen may flicker when changed */
     CF_NOPIN     = 1 << 11, /* cannot be pinned to the Quick page */
-    CF_CONFIRM   = 1 << 12  /* asks first (message in desc) without being shown as dangerous */
+    CF_CONFIRM   = 1 << 12, /* asks first (message in desc) without being shown as dangerous */
+    CF_SECTION   = 1 << 13, /* CT_HEADER: a page section; the plain headers under it are its parts */
+    CF_TABLE     = 1 << 14  /* CT_INFO: a compact line of the Hardware info table */
 };
 
 typedef struct ph_ctl ph_ctl;
@@ -368,6 +371,36 @@ void  ph_fmt_version(wchar_t *out, int n, const int ver[3]);                  /*
 int   ph_open_url(const wchar_t *target);               /* open in the user's (unelevated) shell */
 void *ph_alloc(size_t n);
 void  ph_free(void *p);
+
+/* ---------- fan curves (fans.c) ---------- */
+/* A fan whose owner (the GPD backend, the plugin host) offers a "Curve" mode. The
+   curve sets the duty from the CPU temperature about once a second on the main
+   thread; it hands the fan back to the firmware when the temperature cannot be read. */
+#define FAN_PTS 7                           /* curve points at 30, 40 ... 90 °C */
+typedef struct ph_fan ph_fan;
+struct ph_fan {
+    /* the owner fills these */
+    const wchar_t *name;
+    int   min_pct;
+    int  (*duty)(ph_fan *f, int pct);       /* manual duty; 0 = ok */
+    int  (*autom)(ph_fan *f);               /* back to the firmware */
+    void *ctx;
+    /* fans.c */
+    char     cfg_key[80];                   /* [global] key holding the curve, "20,25,..." */
+    uint8_t  pt[FAN_PTS];                   /* duty % at each point */
+    int      on, cur, fails, firmware, temp;
+    uint64_t last_set;
+    ph_ctl   row;                           /* the CT_CURVE row, shown in Curve mode */
+};
+int  fan_point_temp(int i);                 /* °C of point i */
+void fan_curve_add(ph_fan *f, const char *cfg_key, int16_t order, uint16_t flags);  /* registers f->row */
+void fan_curve_use(ph_fan *f, int on);      /* the owner's Fan mode went to Curve (1) or away (0) */
+int  fan_curve_eval(const ph_fan *f, int temp);
+void fan_curve_point(ph_fan *f, int i, int pct, int save);   /* an edit from the UI */
+void fans_tick(void);                       /* about once a second, main thread */
+void fans_stop(void);                       /* exit and crash: the curves never touch a fan again */
+void ph_set_cpu_temp_reader(int (*fn)(int *celsius));        /* by the CPU backend that can read it */
+int  ph_cpu_temp(int *celsius);             /* 0 = ok */
 
 /* ---------- embedded controller (sys/devices.c) ---------- */
 int   ph_ec_read(uint8_t reg, uint8_t *v);              /* ACPI EC 0x62/0x66 through PawnIO */

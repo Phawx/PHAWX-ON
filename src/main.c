@@ -21,7 +21,7 @@ static volatile LONG cleaned, hw_restored;
 #define ID_SAVEP  5
 #define HK_MENU   1
 
-enum { TM_SAVE = 10, TM_PROFILE = 11, TM_TRAY = 12 };
+enum { TM_SAVE = 10, TM_PROFILE = 11, TM_TRAY = 12, TM_FANS = 13 };
 #define WM_PH_DIRTY (WM_APP + 20)
 
 static void tray_add(void)
@@ -328,10 +328,12 @@ static void app_cleanup(void)
 {
     if (InterlockedExchange(&cleaned, 1)) return;
     HWND m = g_main;
+    fans_stop();                       /* before the backends hand the fans back */
     if (m) {
         KillTimer(m, TM_SAVE);
         KillTimer(m, TM_PROFILE);
         KillTimer(m, TM_TRAY);
+        KillTimer(m, TM_FANS);
         UnregisterHotKey(m, HK_MENU);
     }
     if (fg_hook) { UnhookWinEvent(fg_hook); fg_hook = NULL; }
@@ -358,6 +360,7 @@ static HANDLE restore_done;
 static DWORD WINAPI crash_restore(LPVOID p)
 {
     (void)p;
+    fans_stop();
     autotdp_crash_release(crash_tid);
     ph_backends_shutdown();
     drv_close();
@@ -413,6 +416,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (w == TM_SAVE) { KillTimer(h, TM_SAVE); app_save(); }
         else if (w == TM_TRAY) { KillTimer(h, TM_TRAY); tray_add(); }
         else if (w == TM_PROFILE) { KillTimer(h, TM_PROFILE); profile_check(); }
+        else if (w == TM_FANS) fans_tick();
         else input_on_timer();
         return 0;
     case WM_POWERBROADCAST:
@@ -509,6 +513,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
     }
     ph_apply_all(0);
     plugins_started();
+    SetTimer(g_main, TM_FANS, 1000, NULL);
 
     ui_init(hi);
     input_init(g_main);

@@ -15,7 +15,7 @@ Control keys (such as `cpu.tdp`) are the names used in `phawx.ini`.
 
 | Feature | Status | Where | Notes |
 |---|---|---|---|
-| QAM-style slide-out overlay | Yes | `src/ui.c` | Topmost panel that never takes focus. Slides in from the right edge of the foreground monitor. DPI-aware. Tabs: Quick / CPU / Power / GPU / Display / System / Plugins / Settings. |
+| QAM-style slide-out overlay | Yes | `src/ui.c` | Topmost panel that never takes focus. Slides in from the right edge of the foreground monitor. DPI-aware. Tabs: Quick / CPU / GPU / Display / System / Plugins / Settings. System is split into sections: Power (the former Power tab), Fan control, Lighting, Windows, one per plugin, Hardware info. |
 | "Phawx ON" / "Phawx OFF" header | Yes | `src/ui.c` (header draw), `src/autotdp.c` (`auto.on`) | Green "Phawx ON" while AutoTDP runs, "Phawx OFF" otherwise. Below it, a live strip shows FPS, target and clocks. |
 | Overlay only on request | Yes | `src/ui.c`, `src/main.c` | Opens only from the tray, the button combo, the edge swipe or Ctrl+Alt+P. Starts hidden with `/tray`. |
 | Intel TDP (PL1/PL2) | Yes | `src/cpu/intel.c` (`cpu.tdp`, `cpu.tdpboost`) | MSR 0x610 with the real 0x606 units. Writes the whole field: enable, clamp and time window are kept. PL2 is raised to PL1 if it would end up lower. Controls hide if the BIOS locked the MSR. |
@@ -48,7 +48,9 @@ Control keys (such as `cpu.tdp`) are the names used in `phawx.ini`.
 | Hold to reset | Yes | `src/ui.c` (`hold_*`), `src/input.c` | Hold X (gamepad) or R (keyboard) for 0.5 s, or touch and hold for 2 s (mouse 0.5 s), to set the selected setting back to its default. A bar fills along the row while you hold. Only saved settings reset: on a setting already at Default it says "Already at Default", on rows locked by AutoTDP "Managed by AutoTDP", and on actions, links and plugin switches a long press is an ordinary tap. |
 | Plugins page | Yes | `src/plugins.c` | Status of the two required components (PawnIO and PresentMon, with version: "… is loaded and running", or what is wrong, such as "PawnIO modules are missing" or "PresentMon service is not running") and a Download link for each one that is missing. Below that, every plugin found, with an on/off switch and its status ("Running", "Not running · <reason>"). |
 | DLL plugins | Yes | `src/plugins.c`, `plugins/sdk/phawx_plugin.h`, `docs/PLUGINS.md` | C-ABI DLLs in `plugins\` next to the exe (or one folder below) that export `phx_plugin_init`. They can add controls, AutoTDP clock domains, fans and RGB lights, and they get config, logging and PawnIO EC/MSR access. Off by default, loaded only from Program Files, turning one on asks first and applies on restart. A plugin that crashes or hangs Phawx ON at start, or crashes it later (in its own DLL, a DLL from its folder, or while Phawx ON is calling it), is never called again and is turned off on the next start; everything else is still restored. At most 16 plugins, 48 controls and 4 clocks, fans and lights each. The guide ships in the zip as `sdk\PLUGINS.md`. |
-| Fans and RGB lights from plugins | Yes | `src/plugins.c` (`h_add_fan`, `h_add_rgb`) | The host builds the System page rows (mode, speed, RPM; mode, colour, brightness, effect) and hands the hardware back to firmware as soon as the mode returns to Default, on exit, and after a crash elsewhere (not after the plugin itself crashed). |
+| Fans and RGB lights from plugins | Yes | `src/plugins.c` (`h_add_fan`, `h_add_rgb`) | The host builds the rows in the System page's Fan control and Lighting sections (mode, speed, curve, RPM; mode, colour, brightness, effect) and hands the hardware back to firmware as soon as the mode returns to Default, on exit, and after a crash elsewhere (not after the plugin itself crashed). |
+| Fan curves | Yes | `src/fans.c`, `src/ui.c` (`draw_curve`) | "Curve" fan mode for the GPD fan and every plugin fan. 7 points (30–90 °C) edited on a graph by touch, mouse or gamepad; the duty follows the CPU temperature (Intel package, AMD Tctl from the PM table or the SMN thermal register) once a second, up at once and down by at most 5 %/s, 100 % at 95 °C, back to the firmware without a temperature for 5 s. Saved as `<fan>.curve`, not per game. |
+| Hardware info table | Yes | `src/sys/hwinfo.c` | Last section of the System page: manufacturer, model, board, BIOS, Windows; CPU name, cores, core types, load, clock and the CPU backend's power and temperature; memory in use; every GPU, display and fan reading; power source and battery; PawnIO, PresentMon and the frame rate. Info rows of plugins on the CPU, GPU, Display and System pages are included. |
 | RyzenAdj plugin | Partial | `plugins/ryzenadj/` | Off by default. Uses `libryzenadj.dll` and WinRing0 from `plugins\ryzenadj\`: while it runs, any program on the PC can use WinRing0 to take full control of it. Adds STAPM, fast and slow limits, the temperature limit and (Raven to Lucienne) an iGPU clock domain for AutoTDP. Stands down when the built-in AMD backend already controls the APU. Limits are read back and restored on exit only with the opt-in "Read power table", which installs the InpOut driver as a service that stays after exit (and is not offered on Van Gogh, Mendocino, Dragon Range or Fire Range). Every libryzenadj call is time-limited. |
 
 ## Additional capabilities
@@ -75,16 +77,16 @@ Control keys (such as `cpu.tdp`) are the names used in `phawx.ini`.
 | Core parking CPMIN/CPMAX | Yes | `src/sys/winpower.c`. |
 | SCHEDPOLICY / SHORTSCHEDPOLICY | Yes | `src/sys/winpower.c` (`cpu.sched`, `cpu.shortsched`) |
 | Power mode slider (overlay) | Yes | `src/sys/winpower.c` (`power.mode`) |
-| Min/max processor state, autonomous mode and window, duty cycling | Yes | `src/sys/winpower.c` (Power page, advanced) |
+| Min/max processor state, autonomous mode and window, duty cycling | Yes | `src/sys/winpower.c` (System page, Power section; the tuning rows are advanced) |
 | Radeon Chill, FRTC, Anti-Lag, Boost, RSR, RIS / sharpness | Yes | `src/gpu/amd.c` (`radeon.*`), plus an optional driver restart action |
 | Radeon AFMF, Vari-Bright, VSR, colour depth, UMD settings | No | Could be added to the registry table in `src/gpu/amd.c`. |
 | EDID overrides, DAL restricted modes, integer scaling | Not planned | Destructive display registry edits. |
 | Refresh rate / resolution (qres) | Yes | `src/sys/display.c` (`display.refresh`, `display.res`) |
-| GPD Win Mini fan (EC 0x7A) | Yes | `src/sys/devices.c` (`dev.fanmode`, `dev.fanspeed`) through LpcACPIEC. Picking Default hands the fan back to the firmware at once. The ITE 0x4E/0x4F path cannot work with LpcACPIEC. Only the ACPI EC fallback runs. |
+| GPD Win Mini fan (EC 0x7A) | Yes | `src/sys/devices.c` (`dev.fanmode`, `dev.fanspeed`, curve `dev.fancurve`) through LpcACPIEC. Auto, Manual, Full speed or Curve. Picking Default hands the fan back to the firmware at once. The ITE 0x4E/0x4F path cannot work with LpcACPIEC. Only the ACPI EC fallback runs. |
 | Modern Standby override | Yes | `src/sys/tweaks.c` (`sys.nomodernstandby`, danger) |
 | Game Mode, Game Bar capture, HAGS, touch keyboard | Yes | `src/sys/tweaks.c` (new) |
 | SysMain disable | No | |
 | NVIDIA PCIe link speed, "error 43" fix, HDCP toggle | No | |
 | Dock / undock and battery TDP override | Partial | Settings are reapplied on AC/DC change, but there are no separate AC and DC values yet. |
 | TDP / GPU up and down hotkeys | No | Use the overlay. Dedicated step hotkeys could be added in `src/main.c`. |
-| Hardware info screen | Partial | CPU page shows package power and temperature. GPU page shows clock, load, power and temperature. Settings shows the CPU and driver. |
+| Hardware info screen | Partial | The System page's Hardware info table shows everything Phawx ON reads (see above). Not read yet: per-core clocks and temperatures, motherboard sensor chips, RAM modules, drive health. |
