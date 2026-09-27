@@ -1,6 +1,6 @@
 # Phawx ON
 
-Phawx ON is a small, open-source performance tuning app for Windows handhelds and laptops. It is a native C tray app of about 220 KB with no runtime dependencies. It adds a Steam Deck–style quick-access overlay where you set TDP, EPP, CPU and GPU clocks, and hybrid P/E core behaviour. It also has an **AutoTDP** mode that holds a target frame rate at the lowest CPU and GPU clocks that still reach it.
+Phawx ON is a small, open-source performance tuning app for Windows handhelds and laptops. It is a native C tray app of about 310 KB (PawnIO modules included) with no runtime dependencies. It adds a Steam Deck–style quick-access overlay where you set TDP, EPP, CPU and GPU clocks, and hybrid P/E core behaviour. It also has an **AutoTDP** mode that holds a target frame rate at the lowest CPU and GPU clocks that still reach it.
 
 It is built to be a good citizen:
 
@@ -50,21 +50,22 @@ See [docs/FEATURES.md](docs/FEATURES.md) in the repository for the full feature 
 
 - Windows 10 21H2 or later, or Windows 11, x64. The app asks for administrator rights when it starts.
 - **PawnIO**, needed for TDP, CPU clock, AMD iGPU clock and fan control:
-  1. Install the PawnIO driver from <https://pawnio.eu>. This installs `PawnIOLib.dll` and the driver.
-  2. Put the signed modules from the [PawnIO.Modules releases](https://github.com/namazso/PawnIO.Modules/releases) in a `modules` folder. Use the PawnIO install folder (usually `C:\Program Files\PawnIO\modules\`) or `modules\` next to `PhawxON.exe`. Phawx ON loads:
-     - Intel: `IntelMSR.bin`, `IntelMCHBAR.bin`
-     - AMD: `AMDFamily17.bin`, `RyzenSMU.bin`
-     - Fan: `LpcACPIEC.bin`
+  Install it from <https://pawnio.eu>. That installs the driver and `PawnIOLib.dll`, and nothing else is needed: PawnIO's installer ships no modules, so the signed modules Phawx ON uses are built into `PhawxON.exe` (from [PawnIO.Modules](https://github.com/namazso/PawnIO.Modules) 0.2.11, LGPL-2.1, see `res/pawnio/` and `LICENSE-PawnIO-Modules.txt` in the zip):
+  - Intel: `IntelMSR.bin`, `IntelMCHBAR.bin`
+  - AMD: `AMDFamily17.bin`, `RyzenSMU.bin`
+  - Fan: `LpcACPIEC.bin`
 
-  The driver only runs code signed by the PawnIO project. Phawx ON can therefore only do what those modules allow. On Intel this means the power limit (0x610) is available, but turbo ratios and HWP MSRs are not. Without PawnIO, the Windows power, GPU vendor API and display controls still work. The **Plugins** page shows whether PawnIO is running and which modules are missing, and links to the download.
+  A file with the same name in PawnIO's install folder (`C:\Program Files\PawnIO\` or its `modules\` folder), or next to `PhawxON.exe` (or in its `modules\` folder), is used only if PawnIO does not accept the built-in module.
+
+  The driver only runs code signed by the PawnIO project. Phawx ON can therefore only do what those modules allow. On Intel this means the power limit (0x610) is available, but turbo ratios and HWP MSRs are not. Without PawnIO, the Windows power, GPU vendor API and display controls still work. The **Plugins** page shows whether PawnIO is running, with its version, and links to the download.
 - **Intel PresentMon** (only needed for AutoTDP and the FPS readout): install PresentMon 2.x from <https://game.intel.com/story/intel-presentmon/> or [GitHub](https://github.com/GameTechDev/PresentMon/releases). Phawx ON uses the PresentMon service and its `PresentMonAPI2.dll`. It only loads that DLL from under Program Files, and starts the service if it is stopped.
 - GPU clock control uses each vendor's own driver component: `amdadlx64.dll` / `atiadlxx.dll` (AMD Adrenalin), `nvml.dll` (NVIDIA driver) or `ControlLib.dll` (Intel graphics driver). Controls for a GPU without its driver component are hidden.
 
 ## Install
 
-1. Download `PhawxON-1.1.0.zip` from [Releases](https://github.com/Phawx/PHAWX-ON/releases).
+1. Download `PhawxON-1.1.1.zip` from [Releases](https://github.com/Phawx/PHAWX-ON/releases).
 2. Extract it to **`C:\Program Files\`**. The zip contains a `PhawxON` folder, so the app ends up in `C:\Program Files\PhawxON\PhawxON.exe`. "Start with Windows" and plugins only work under Program Files, because an app that runs elevated must never load anything from a folder that normal users can write to.
-3. Install PawnIO with its modules, and PresentMon if you want AutoTDP (see above).
+3. Install PawnIO, and PresentMon if you want AutoTDP (see above).
 4. Run `PhawxON.exe`.
 5. Optional: turn on **Settings → Start with Windows**. This creates a logon task that starts Phawx ON hidden in the tray (`/tray`).
 

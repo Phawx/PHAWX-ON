@@ -33,7 +33,7 @@ build/%.o: src/%.c src/phawx.h src/version.h plugins/sdk/phawx_plugin.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-build/phawx.res.o: res/phawx.rc res/phawx.ico res/phawx.manifest src/version.h
+build/phawx.res.o: res/phawx.rc res/phawx.ico res/phawx.manifest src/version.h $(wildcard res/pawnio/*.bin)
 	@mkdir -p build
 	$(WINDRES) -I res -I src -O coff -o $@ res/phawx.rc
 
@@ -54,6 +54,7 @@ dist: $(OUT) $(PLUGINS)
 	@rm -rf dist/PhawxON
 	@mkdir -p dist/PhawxON/plugins/ryzenadj dist/PhawxON/sdk
 	cp $(OUT) README.md LICENSE dist/PhawxON/
+	cp res/pawnio/COPYING dist/PhawxON/LICENSE-PawnIO-Modules.txt
 	cp build/plugins/ryzenadj/ryzenadj.dll dist/PhawxON/plugins/ryzenadj/
 	cp plugins/sdk/phawx_plugin.h plugins/example/example.c plugins/example/example.rc docs/PLUGINS.md dist/PhawxON/sdk/
 	cd dist && rm -f PhawxON-$(VERSION).zip && zip -qr PhawxON-$(VERSION).zip PhawxON

@@ -94,10 +94,33 @@ static int exec(int m, const char *fn, const uint64_t *in, int nin, uint64_t *ou
     return SUCCEEDED(hr) ? 0 : -1;
 }
 
+static int load_blob(int m, const UCHAR *blob, DWORD n)
+{
+    HANDLE h = NULL;
+    if (FAILED(p_open(&h)) || !h) return -1;
+    if (SUCCEEDED(p_load(h, blob, n))) { mh[m] = h; return 0; }
+    p_close(h);
+    return -1;
+}
+
+/* The PawnIO installer ships no modules: programs bring their own, so the signed
+   ones Phawx ON uses are built in (res/pawnio). A file of the same name on disk is
+   the fallback for when PawnIO does not accept the built-in one. */
 static void load_module(int m, const wchar_t *file)
 {
-    wchar_t path[MAX_PATH];
-    if (!find_file(file, path)) { ph_log("pawnio: %ls not found", file); return; }
+    wchar_t name[40] = L"PAWNIO_", path[MAX_PATH];
+    int k = 7;
+    for (const wchar_t *c = file; *c && *c != L'.' && k < PH_ARRAY(name) - 1; c++)
+        name[k++] = *c >= L'a' && *c <= L'z' ? (wchar_t)(*c - 32) : *c;
+    name[k] = 0;
+    HRSRC r = FindResourceW(NULL, name, RT_RCDATA);
+    HGLOBAL g = r ? LoadResource(NULL, r) : NULL;
+    const UCHAR *res = g ? LockResource(g) : NULL;
+    DWORD rn = r ? SizeofResource(NULL, r) : 0;
+    if (res && rn && load_blob(m, res, rn) == 0) return;
+    if (res) ph_log("pawnio: built-in %ls rejected", file);
+
+    if (!find_file(file, path)) { if (!res) ph_log("pawnio: %ls not found", file); return; }
     HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
     if (f == INVALID_HANDLE_VALUE) return;
     LARGE_INTEGER sz;
@@ -106,11 +129,8 @@ static void load_module(int m, const wchar_t *file)
     if (GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && sz.QuadPart < (4 << 20) &&
         (blob = ph_alloc((size_t)sz.QuadPart)) != NULL &&
         ReadFile(f, blob, (DWORD)sz.QuadPart, &got, NULL) && got == (DWORD)sz.QuadPart) {
-        HANDLE h = NULL;
-        if (SUCCEEDED(p_open(&h)) && h) {
-            if (SUCCEEDED(p_load(h, blob, got))) mh[m] = h;
-            else { p_close(h); ph_log("pawnio: %ls rejected", file); }
-        }
+        if (load_blob(m, blob, got) == 0) ph_log("pawnio: %ls loaded from %ls", file, path);
+        else ph_log("pawnio: %ls rejected", path);
     }
     ph_free(blob);
     CloseHandle(f);
