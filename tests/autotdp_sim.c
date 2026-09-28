@@ -189,6 +189,8 @@ typedef struct {
     int   dur_s;
     int   reachable;
     int   crash;                /* end with the crash handler's release instead of a stop */
+    int   user_pmax;            /* the user's own "P-core max unparked" %, 0 = Windows' 100 */
+    int   pause_s;              /* no frames for 5 s from this second (alt-tab), 0 = never */
 } scen;
 
 static const scen *S;
@@ -201,7 +203,8 @@ static uint64_t bat_t, rng = 88172645463325252ull;
 static uint64_t stat_t0;
 static double stat_p, stat_n, stat_short, stat_all;
 static int min_p = 99, min_e = 99, min_total = 99;
-static int churn, last_np, last_ne, last_epp;
+static int churn, last_np, last_ne, last_epp, max_p;
+static int pause_restored = -1, pre_cores = -1, post_cores = -1, pre_trial;
 
 static double urand(void)
 {
@@ -283,7 +286,8 @@ static void plant(double dt)
     T += (uint64_t)dt;
     double tsec = (double)(T - T0) / 1000.0;
     if (S->change_s && tsec >= S->change_s) gscale = S->change_gpu;
-    game_on = !S->quit_s || tsec < S->quit_s;
+    int paused = S->pause_s && tsec >= S->pause_s && tsec < S->pause_s + 5;
+    game_on = (!S->quit_s || tsec < S->quit_s) && !paused;
     /* the scene wobbles: about 3% either way, over a couple of seconds */
     double a = dt / 2000.0;
     wob_c += -wob_c * a + nrand() * sqrt(a) * 0.05;
@@ -314,7 +318,16 @@ static void plant(double dt)
     }
     if (T >= stat_t0 && game_on) { stat_p += o->p_sys * dt; stat_n += dt; }
     int total = np + ne;
+    if (S->pause_s) {
+        /* just before the pause, near its end (everything back to Windows'), and a
+           few seconds after it (where the search was) */
+        if (tsec < S->pause_s) { pre_cores = total; pre_trial = tr.kind; }
+        if (paused && tsec >= S->pause_s + 4 && pause_restored < 0)
+            pause_restored = ws_get(&G_EPP1) == 33 && ws_get(&G_CPMAX0) == 100 && ws_get(&G_CPMAX1) == 100;
+        if (tsec >= S->pause_s + 8 && post_cores < 0) post_cores = total;
+    }
     if (game_on) {
+        max_p = IMAX(max_p, np);
         min_p = IMIN(min_p, np);
         min_e = IMIN(min_e, ne);
         min_total = IMIN(min_total, total);
@@ -477,6 +490,8 @@ static const scen scens[] = {
     { "main thread heavy, uncapped, target 60, hybrid", 1, 40, 20, 14, 4, 0, 60, 2000, 1, 1, 0, 1, 0, 600, 1 },
     { "many busy threads (parking costs frames), hybrid", 1, 8, 160, 14, 11, 0, 60, 2000, 1, 1, 0, 1, 0, 600, 1 },
     { "crash while running, 8 cores", 0, 6, 12, 18, 4, 60, 60, 2000, 1, 1, 0, 1, 0, 200, 1, 1 },
+    { "user limits P-cores to 50%, hybrid", 1, 6, 12, 18, 4, 60, 60, 2000, 1, 1, 0, 1, 0, 500, 1, 0, 50 },
+    { "no frames for 5 s at 400 s (alt-tab), hybrid", 1, 6, 12, 18, 4, 60, 60, 2000, 1, 1, 0, 1, 0, 600, 1, 0, 0, 400 },
 };
 
 static void machine(int hybrid)
@@ -500,7 +515,8 @@ static void machine(int hybrid)
 
 static int restored(const char *when, int epp)
 {
-    int ok = ws_get(&G_EPP0) == (DWORD)epp && ws_get(&G_EPP1) == (DWORD)epp && ws_get(&G_CPMAX0) == 100 && ws_get(&G_CPMAX1) == 100 &&
+    DWORD pmax = S->user_pmax ? (DWORD)S->user_pmax : 100;
+    int ok = ws_get(&G_EPP0) == (DWORD)epp && ws_get(&G_EPP1) == (DWORD)epp && ws_get(&G_CPMAX0) == 100 && ws_get(&G_CPMAX1) == pmax &&
              ws_get(&G_CPMIN0) == 5 && ws_get(&G_CPMIN1) == 5;
     if (!ok)
         printf("    FAIL settings not restored %s: EPP %lu/%lu CPMAX %lu/%lu CPMIN %lu/%lu\n", when, ws_get(&G_EPP0),
@@ -528,6 +544,8 @@ static int run(int idx, int cores, int epp_mode, double *power, int mode)
     stat_t0 = T0 + (uint64_t)(s->quit_s ? s->quit_s - 60 : s->dur_s - 60) * 1000;
     stat_p = stat_n = stat_short = stat_all = 0;
     min_p = min_e = min_total = 99;
+    max_p = 0;
+    pause_restored = pre_cores = post_cores = -1;
     churn = 0;
     cap_cpu = cpu_clk.max_mhz;
     cap_gpu = gpu_clk.max_mhz;
@@ -539,6 +557,7 @@ static int run(int idx, int cores, int epp_mode, double *power, int mode)
     ctls[K_FPS].val = s->target;
     ctls[K_CORES].val = cores;
     ctls[K_EPP].val = epp_mode;
+    if (s->user_pmax) wp_write(NULL, &G_CPMAX1, (DWORD)s->user_pmax, (DWORD)s->user_pmax);
     for (int i = 0; i < 20; i++) plant(50);
 
     if (start_locked()) { printf("    FAIL AutoTDP did not start\n"); return 0; }
@@ -570,11 +589,15 @@ static int run(int idx, int cores, int epp_mode, double *power, int mode)
     int floor_ok = s->hybrid ? min_p >= 2 && min_e >= 1 : min_total >= 2;
     int f_frames = s->reachable && shortf > 0.03, f_power = s->reachable && !s->quit_s && p > b.p * 1.12;
     int f_churn = s->dur_s >= 400 && churn > s->dur_s / 40;   /* a short run is still searching */
-    ok &= !f_frames && !f_power && floor_ok && !f_churn;
+    int f_user = s->user_pmax && max_p > (s->user_pmax * NP + 99) / 100;
+    /* a trial running when the frames stopped is abandoned, so only then may the cores differ */
+    int f_pause = s->pause_s && (pause_restored != 1 || (post_cores != pre_cores && !pre_trial));
+    ok &= !f_frames && !f_power && floor_ok && !f_churn && !f_user && !f_pause;
     if (mode == RUN_QUIET) {
-        if (f_frames || f_power || !floor_ok || f_churn)
-            printf("    seed %d: frames short %.1f%%, power +%.1f%%, fewest cores %d, changes late %d\n", seed,
-                   shortf * 100, (p / b.p - 1) * 100, min_total, churn);
+        if (f_frames || f_power || !floor_ok || f_churn || f_user || f_pause)
+            printf("    seed %d: frames short %.1f%%, power +%.1f%%, fewest cores %d, changes late %d%s%s\n", seed,
+                   shortf * 100, (p / b.p - 1) * 100, min_total, churn, f_user ? ", too many P-cores" : "",
+                   f_pause ? ", pause not handled" : "");
         return ok;
     }
     printf("  end: CPU %d GPU %d, %d P + %d E cores, EPP %d   [%ls | %ls]\n", end_c, end_g, end_np, end_ne, end_epp, st1, st2);
@@ -590,6 +613,12 @@ static int run(int idx, int cores, int epp_mode, double *power, int mode)
     if (f_power) printf("    FAIL power %.1f%% above the best\n", (p / b.p - 1) * 100);
     if (!floor_ok) printf("    FAIL went below the core floor\n");
     if (f_churn) printf("    FAIL still changing settings late: %d\n", churn);
+    if (s->user_pmax) printf("  most P-cores used %d (the user allows %d)\n", max_p, (s->user_pmax * NP + 99) / 100);
+    if (f_user) printf("    FAIL used more P-cores than the user allows\n");
+    if (s->pause_s)
+        printf("  pause: settings back to Windows' %s; cores %d before, %d after%s\n", pause_restored == 1 ? "yes" : "no",
+               pre_cores, post_cores, pre_trial ? " (a trial was running)" : "");
+    if (f_pause) printf("    FAIL the pause was not handled\n");
     return ok;
 }
 

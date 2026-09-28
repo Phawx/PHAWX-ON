@@ -448,6 +448,7 @@ typedef struct {
     uint64_t bad_t;
     int      miss;                      /* trials in a row that saved nothing */
     uint64_t next_t;                    /* no trial before this */
+    int      resume;                    /* where it was when the game stopped showing frames */
 } knob;
 
 static knob kn[KN_N];
@@ -504,7 +505,16 @@ static void kn_setup(void)
     }
     memset(kn, 0, sizeof kn);
     for (int i = KN_CORE0; i <= KN_CORE1; i++) {
-        kn[i].n = kn[i].home = kn[i].cur = n[i];
+        /* never more cores than the plan already allows (the user's own limit) */
+        DWORD ac, dcv;
+        int home = n[i];
+        const GUID *g = i ? &G_CPMAX1 : &G_CPMAX0;
+        if (n[i] && wp_read(&GUID_SUB_PROCESSOR_, g, 0, &ac) == 0 && wp_read(&GUID_SUB_PROCESSOR_, g, 1, &dcv) == 0) {
+            DWORD pct = ac < dcv ? ac : dcv;
+            if (pct < 100) home = PH_CLAMP((int)((pct * (DWORD)n[i] + 99) / 100), 1, n[i]);
+        }
+        kn[i].n = n[i];
+        kn[i].home = kn[i].cur = kn[i].resume = home;
         kn[i].step = 1;
         kn[i].applied = -1;
     }
@@ -522,7 +532,7 @@ static void kn_setup(void)
 
 static void kn_sync(void)
 {
-    for (int i = KN_CORE0; i <= KN_CORE1; i++) kn[i].on = g_auto.manage_cores && kn[i].n > kn[i].limit && !kn[i].broken;
+    for (int i = KN_CORE0; i <= KN_CORE1; i++) kn[i].on = g_auto.manage_cores && kn[i].home > kn[i].limit && !kn[i].broken;
     kn[KN_EPP].on = g_auto.epp_mode == EPP_TUNE && g_plat.epp && !kn[KN_EPP].broken;
 }
 
@@ -531,7 +541,7 @@ static void kn_reset(void)
 {
     for (int i = 0; i < KN_N; i++) {
         knob *k = &kn[i];
-        k->cur = k->home;
+        k->cur = k->resume = k->home;
         k->bad = k->bad_n = k->miss = 0;
         k->bad_t = k->next_t = 0;
     }
@@ -578,15 +588,19 @@ static void kn_write(int i, int want)
 }
 
 /* the CPMAXCORES for `cur` cores. Rounded up it gives at least that many however
-   Windows rounds; once Windows is seen rounding up, rounded down gives exactly that. */
-static int park_pct(const knob *k) { return park_up ? k->cur * 100 / k->n : (k->cur * 100 + k->n - 1) / k->n; }
+   Windows rounds; once Windows is seen rounding up, rounded down gives exactly that,
+   except at the floor, which must hold even if that was misread. */
+static int park_pct(const knob *k)
+{
+    return park_up && k->cur > k->limit ? k->cur * 100 / k->n : (k->cur * 100 + k->n - 1) / k->n;
+}
 
 static void kn_apply(int game)
 {
     for (int i = KN_CORE0; i <= KN_CORE1; i++) {
         knob *k = &kn[i];
         if (!game || !k->on) k->cur = k->home;
-        kn_write(i, k->n && k->cur < k->n ? park_pct(k) : -1);
+        kn_write(i, k->n && k->cur < k->home ? park_pct(k) : -1);
     }
     knob *e = &kn[KN_EPP];
     if (!game || !e->on) e->cur = e->home;
@@ -881,6 +895,7 @@ static DWORD WINAPI worker(LPVOID p)
     float ff = 0.0f, gs = -1.0f, cs_ = -1.0f, cap_target = 0.0f;
     int refresh = 60, cmax = -1, cavg = -1, gutil = -1, below_n = 0, idle = 1, last_target = 0;
     int bn = 0, probe_ms = CAP_PROBE_MS;
+    uint64_t idle_t = 0, game_t = 0;
     float last_cap = 0.0f;
     DWORD last_pid = 0;
     DWORD wait = 50;
@@ -896,8 +911,7 @@ static DWORD WINAPI worker(LPVOID p)
         ph_clk *g = ph_gpu_clk();
         if (!dom_usable(g)) g = NULL;
         if (g != dg.d) {
-            if (tr.kind == TK_GPU) tr.kind = TK_NONE;
-            if (lower_dom == &dg) lower_dom = NULL;
+            tr_cancel();
             dom_release(&dg);
             dg.d = g;
             dg.cur = 0;
@@ -938,9 +952,11 @@ static DWORD WINAPI worker(LPVOID p)
         if (!game) {
             if (!idle) {
                 idle = 1;
+                idle_t = now;
                 ff = 0.0f;
                 cap_target = 0.0f;
                 tr_cancel();
+                for (int i = 0; i < KN_N; i++) kn[i].resume = kn[i].cur;
             }
             if (dc.d) dc.cur = dc.ceil;
             if (dg.d) dg.cur = dg.ceil;
@@ -953,8 +969,13 @@ static DWORD WINAPI worker(LPVOID p)
         }
         if (idle) {
             idle = 0;
+            game_t = now;
             stable_since = now;
             below_n = 0;
+            /* the same game back within a minute (a pause, alt-tab): where the search was */
+            if (idle_t && now - idle_t < 60000)
+                for (int i = 0; i < KN_N; i++)
+                    if (kn[i].on) kn[i].cur = kn[i].resume;
         }
         wait = 50;
         /* only with a game: every reading wakes the SMU, the GPU or the EC */
@@ -998,7 +1019,8 @@ static DWORD WINAPI worker(LPVOID p)
         int ra = g_auto.raise_aggr;
         float big = 0.30f - 0.04f * (float)ra;
 
-        int below = ff < thr_lo;
+        /* the frame rate climbs back from nothing when frames start again: not a shortfall */
+        int below = ff < thr_lo && now - game_t >= 2000;
         if (below) { below_n++; if (!below_since) below_since = now; }
         else { below_n = 0; below_since = 0; }
         float d = below ? (eff - ff) / eff : 0.0f;
