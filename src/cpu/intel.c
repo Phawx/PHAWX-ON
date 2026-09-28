@@ -178,6 +178,25 @@ static int read_temp(int *c)
     return 0;
 }
 
+/* for AutoTDP: package power since its previous call, with its own counter state */
+static int read_power(int *mw)
+{
+    static uint32_t e0;
+    static double t0;
+    static int have;
+    uint64_t v;
+    if (drv_rdmsr(MSR_PKG_ENERGY, &v)) return -1;
+    uint32_t e = (uint32_t)v;
+    double now = ph_qpc_ms(), dt = now - t0;
+    int ok = 0;
+    if (have && dt >= 50.0 && dt < 5000.0) {
+        double w = (double)(uint32_t)(e - e0) / (double)(1ull << energy_unit) / (dt / 1000.0);
+        if (w >= 0.0 && w < 400.0) { *mw = (int)(w * 1000.0); ok = 1; }
+    }
+    if (!have || dt >= 50.0) { e0 = e; t0 = now; have = 1; }
+    return ok ? 0 : -1;
+}
+
 static int get_power(ph_ctl *c, int32_t *out) { *out = pkg_mw; return pkg_mw < 0 ? -1 : 0; }
 static int get_temp(ph_ctl *c, int32_t *out) { *out = pkg_temp; return pkg_temp < 0 ? -1 : 0; }
 
@@ -258,6 +277,7 @@ static int intel_init(void)
     }
     if (!have_temp) ctls[C_TEMP].flags |= CF_HIDDEN;
     if (drv_rdmsr(MSR_PKG_ENERGY, &t)) ctls[C_PWR].flags |= CF_HIDDEN;
+    else ph_set_power_reader(PWR_PKG, read_power);
 
     sample();
     ph_register_ctls(ctls, PH_ARRAY(ctls));

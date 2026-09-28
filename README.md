@@ -1,6 +1,6 @@
 # Phawx ON
 
-Phawx ON is a small, open-source performance tuning app for Windows handhelds and laptops. It is a native C tray app of about 320 KB (PawnIO modules included) with no runtime dependencies. It adds a Steam Deck–style quick-access overlay where you set TDP, EPP, CPU and GPU clocks, and hybrid P/E core behaviour. It also has an **AutoTDP** mode that holds a target frame rate at the lowest CPU and GPU clocks that still reach it.
+Phawx ON is a small, open-source performance tuning app for Windows handhelds and laptops. It is a native C tray app of about 330 KB (PawnIO modules included) with no runtime dependencies. It adds a Steam Deck–style quick-access overlay where you set TDP, EPP, CPU and GPU clocks, and hybrid P/E core behaviour. It also has an **AutoTDP** mode that holds a target frame rate with as little power as it can: the lowest CPU and GPU clocks, the fewest unparked cores and the laziest EPP that still reach it, checked against what the machine actually draws.
 
 It is built to be a good citizen:
 
@@ -22,7 +22,7 @@ See [docs/FEATURES.md](docs/FEATURES.md) in the repository for the full feature 
 - **Hold to reset.** Hold X or R on a setting for half a second (or touch and hold it for 2 seconds) to put it back to Default.
 - **Fan control.** Auto, Manual, Full speed or **Curve** for the built-in GPD Win Mini fan and for plugin fans. In Curve mode you draw the fan speed against the CPU temperature on a graph.
 - **Lighting.** RGB lights from plugins: off, solid colour or the plugin's effects, colour and brightness.
-- **Hardware info.** A table of everything Phawx ON can read: system, BIOS and Windows version, CPU, load, power and temperature, memory, GPU clocks, load, power and temperature, display mode, fan speeds, battery, and the state of PawnIO and PresentMon.
+- **Hardware info.** A table of everything Phawx ON can read: system, BIOS and Windows version, CPU, load, power and temperature, memory, GPU clocks, load, power and temperature, display mode, fan speeds, battery and its discharge rate, and the state of PawnIO and PresentMon.
 - **Plugins.** DLLs in a `plugins` folder add controls, clock domains, fans and RGB lights. The Plugins page also shows whether PawnIO and PresentMon are installed and running. A RyzenAdj plugin is included. The plugin guide is [docs/PLUGINS.md](docs/PLUGINS.md) in the repository and `sdk\PLUGINS.md` in the release zip.
 - **TDP.**
   - Intel: PL1/PL2 and their time windows, through MSR 0x610 with the real power units.
@@ -39,11 +39,10 @@ See [docs/FEATURES.md](docs/FEATURES.md) in the repository for the full feature 
   - Intel iGPU / Arc: IGCL frequency and power limits.
   - Radeon Chill, frame rate target, Anti-Lag, Boost, RSR and sharpening.
 - **AutoTDP.**
-  - Sets EPP to 0.
-  - Watches the foreground game's FPS through PresentMon.
+  - Watches the foreground game's FPS through PresentMon, and detects whether the CPU or the GPU is the bottleneck.
   - Raises CPU or GPU clocks quickly when FPS drops, and lowers them slowly once FPS is stable.
-  - Detects whether the CPU or the GPU is the bottleneck.
-  - Can park P/E cores dynamically.
+  - Looks for the fewest cores Windows needs to keep unparked (per core type on hybrid CPUs), and for the highest EPP that still holds the frame rate.
+  - Measures the power draw: the battery's discharge rate (the whole machine) on battery, the CPU package and a discrete GPU otherwise. Fewer cores or a higher EPP is kept only when the machine then draws less.
   - Target can be the refresh rate, half the refresh rate, or a custom value.
 - **Per-game profiles** (off by default). Save the current settings for the game in front. They load automatically whenever that game is in the foreground.
 - **Display.** Refresh rate and resolution.
@@ -134,9 +133,27 @@ Pinned settings are listed on the Quick page under **Pinned**, in the order you 
 2. Choose a target: refresh rate, half refresh, or custom FPS.
 3. Start a game.
 
-The status line shows current and target FPS, the CPU and GPU clocks, and which one is the bottleneck. While AutoTDP runs, the clock and EPP controls it manages are locked and show "AutoTDP". Floors, ceilings, aggressiveness, settle time and dynamic core parking are under **CPU → AutoTDP tuning** (advanced).
+The status line shows current and target FPS, the CPU and GPU clocks, and which one is the bottleneck. **Power use** below it shows what the machine draws (*system* on battery, *CPU+GPU* otherwise), how many cores are unparked, the EPP, and what AutoTDP is trying at the moment. While AutoTDP runs, the clock, EPP and core parking controls it manages are locked and show "AutoTDP".
+
+How it works:
+
+- **Clocks first.** When FPS falls short it raises the CPU or GPU clock cap at once (both when it is far off). While FPS holds it lowers them a step at a time. Far from the limit these are quick steps watched for dropped frames. Near it, each step is kept unless the power reading goes up, which happens below the voltage floor, where a lower clock only makes the chip busy for longer.
+- **Then cores and EPP**, one trial at a time, while the frame rate is steady. A trial parks one or more cores (**CPMAXCORES**, per core type on hybrid CPUs) or raises EPP by 20 (up to 60). The clocks may rise a little to make up for it. After it settles, AutoTDP compares the power with what it drew before. It keeps the change only if the machine now draws clearly less at the same frame rate and the 1% lows held, and otherwise puts back the setting and the clocks. A trial that saved nothing is tried again later with a bigger step, after 30 s, 1, 2 and then 4 minutes. A value that cost frames is left alone for 20 s, longer if it keeps failing.
+- **When frames fall short** with cores parked or EPP raised (and the GPU is not the limit), it goes back toward all cores and EPP 0 at once, all the way if it is far off.
+- **Floors.** At least two cores stay unparked, and on a hybrid CPU at least two P-cores and one E-core. Phawx ON reads which cores Windows has really parked, so it skips limits that change nothing and adjusts to how Windows rounds the percentage.
+- **Timing.** A package reading settles in a second. A battery that only updates every few seconds makes each trial wait for a few updates. Without any power reading AutoTDP only parks cores where the GPU is clearly the limit and the CPU mostly idles, and leaves EPP at 0.
+- **Out of reach.** If the target cannot be reached even at full speed, AutoTDP holds what the machine does reach, a little under it, with the least power. Now and then it checks whether the target has become reachable again.
+- **No game.** The clock caps come off, and core parking and a tuned EPP go back to Windows' settings. Everything is restored when AutoTDP stops, when Phawx ON exits, and after a crash.
+
+Under **CPU → AutoTDP tuning** (advanced):
+
+- **Find the fewest cores**: On by default (CPUs with three cores or more).
+- **EPP while active**: *Tune for power* (the default) starts at 0 and looks for a higher EPP. *0 (fastest)* keeps EPP at 0 while AutoTDP runs, as 1.2 did. *Windows* leaves EPP alone.
+- Floors, ceilings, aggressiveness and settle time are there too.
 
 AutoTDP works on clocks, not power limits. Set a TDP ceiling on the Quick page if you also want a hard power cap.
+
+`make sim` runs AutoTDP against a simulated handheld (`tests/autotdp_sim.c`, under wine off Windows). The scenarios include a GPU-bound game, a CPU-bound game, a scene change, a target out of reach, battery-only power and no power reading. It checks that the frame rate holds, that the power ends close to the best any setting could reach, and that every setting is restored.
 
 ### Per-game profiles
 

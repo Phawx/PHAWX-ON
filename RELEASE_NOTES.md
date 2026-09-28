@@ -1,3 +1,17 @@
+Phawx ON 1.3
+
+New
+- **AutoTDP holds the frame rate with the least power.** It still lowers the CPU and GPU clocks while the frame rate holds. It now also looks for the fewest cores Windows needs to keep unparked (per core type on hybrid CPUs) and for the highest EPP that still holds the frame rate. Each change is checked against the power draw: on battery, the battery's discharge rate for the whole machine; otherwise the CPU package (Intel RAPL, AMD power table) plus an NVIDIA GPU. It tries one thing at a time. A clock step near the limit is kept unless the draw goes up. Fewer cores or a higher EPP is kept only when the machine then draws clearly less at the same frame rate and 1% lows, and the clocks may rise a little to make up for it. When frames fall short it goes back toward all cores and EPP 0 at once. At least two cores stay unparked, and on hybrid CPUs two P-cores and an E-core.
+- **Power use** on the Quick page, under the AutoTDP status: the draw, the unparked cores, the EPP and what AutoTDP is trying. The header strip shows the draw too.
+- **Battery draw** in Hardware info: what the machine takes from the battery.
+- `make sim` runs AutoTDP against a simulated handheld and checks the frame rate, the power against the best any setting could reach, the core floors, and that everything is restored.
+
+Changed
+- **Find the fewest cores** (formerly *Dynamic core parking*, CPU → AutoTDP tuning) is on by default and works on all CPUs with three cores or more, not only hybrid ones. It parks cores step by step instead of half of a core type at once.
+- **EPP while active** (formerly *Force EPP 0 while active*) has three settings. *Tune for power* is the new default. *0 (fastest)* is the old behaviour. *Windows* leaves EPP alone. A saved On or Off keeps its meaning (0 or Windows).
+- Without a game, AutoTDP now puts core parking and a tuned EPP back to Windows' settings, instead of leaving them as they were.
+- When the target cannot be reached, AutoTDP holds the frame rate it does reach, a little under it, and lowers what is not the limit (such as the CPU clock in a GPU-bound game). Before, it kept everything at full speed.
+
 Phawx ON 1.2
 
 New

@@ -5,8 +5,8 @@
 #ifndef PH_VERSION_H
 #define PH_VERSION_H
 #define PH_VER_MAJOR 1
-#define PH_VER_MINOR 2
+#define PH_VER_MINOR 3
 #define PH_VER_PATCH 0
-#define PH_VERSION   "1.2.0"
-#define PH_VERSION_W L"1.2.0"
+#define PH_VERSION   "1.3.0"
+#define PH_VERSION_W L"1.3.0"
 #endif

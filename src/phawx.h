@@ -236,6 +236,7 @@ int  fps_sample(ph_fps *out);          /* foreground presenting process */
 HANDLE fps_event(void);                /* signalled on new frames (throttled) */
 
 /* ---------- AutoTDP (autotdp.c) ---------- */
+enum { EPP_LEAVE, EPP_ZERO, EPP_TUNE };   /* what AutoTDP does with EPP */
 typedef struct ph_auto_cfg {
     int target_fps;       /* 0 = match refresh rate */
     int tolerance_pct;    /* dead band below target, default 3 */
@@ -244,8 +245,8 @@ typedef struct ph_auto_cfg {
     int settle_ms;        /* stable time before probing down */
     int cpu_floor_mhz, cpu_ceil_mhz;
     int gpu_floor_mhz, gpu_ceil_mhz;
-    int manage_cores;     /* park / unpark E/P cores dynamically */
-    int epp_zero;         /* force EPP 0 while running */
+    int manage_cores;     /* look for the fewest unparked cores that hold the target */
+    int epp_mode;         /* EPP_* */
     int half_refresh;
 } ph_auto_cfg;
 typedef struct ph_auto_state {
@@ -255,7 +256,12 @@ typedef struct ph_auto_state {
     float fps;
     int   cpu_util, gpu_util;
     int   bottleneck;     /* 0 none, 1 cpu, 2 gpu */
-    int   parked_e, parked_p;
+    int   power_mw;       /* what the machine draws, -1 unknown */
+    int   power_src;      /* PSRC_* */
+    int   cores, cores_max;   /* cores AutoTDP lets Windows use, of cores_max (0 = not managed) */
+    int   cores_on;       /* cores Windows has unparked now, -1 unknown */
+    int   epp;            /* EPP AutoTDP set, -1 = Windows' own */
+    int   trial;          /* what it is trying now, 0 = nothing (autotdp.c) */
 } ph_auto_state;
 extern ph_auto_cfg g_auto;
 int  autotdp_start(void);
@@ -371,6 +377,17 @@ void  ph_fmt_version(wchar_t *out, int n, const int ver[3]);                  /*
 int   ph_open_url(const wchar_t *target);               /* open in the user's (unelevated) shell */
 void *ph_alloc(size_t n);
 void  ph_free(void *p);
+
+/* ---------- power draw (power.c) ---------- */
+/* sys_mw is the whole machine, from the battery while it discharges; the parts come
+   from readers the backends register. -1 = unknown. */
+typedef struct ph_power { int sys_mw, pkg_mw, gpu_mw; } ph_power;
+enum { PWR_PKG, PWR_GPU, PWR_KINDS };          /* CPU package or APU; a discrete GPU */
+enum { PSRC_NONE, PSRC_PARTS, PSRC_SYSTEM };    /* where a total came from */
+void ph_set_power_reader(int kind, int (*fn)(int *mw));
+int  ph_power_read(ph_power *p);                /* 0 if anything was read */
+int  ph_battery_mw(void);                       /* the battery's discharge rate alone, -1 on AC */
+int  ph_power_total(const ph_power *p, int *src);   /* battery, else package + GPU; -1 */
 
 /* ---------- fan curves (fans.c) ---------- */
 /* A fan whose owner (the GPD backend, the plugin host) offers a "Curve" mode. The

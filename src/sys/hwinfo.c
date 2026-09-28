@@ -23,7 +23,7 @@ static ph_ctl sec_lights = { .label = L"Lighting", .type = CT_HEADER, .page = PG
 /* ---------- live values, refreshed by the tick ---------- */
 
 static wchar_t s_bios[64], s_win[64], s_cores[48], s_types[48];
-static int cpu_load = -1, mem_pct = -1, bat_pct = -1, bat_secs = -1, bat_flag, on_ac = -1;
+static int cpu_load = -1, mem_pct = -1, bat_pct = -1, bat_secs = -1, bat_flag, on_ac = -1, bat_mw = -1;
 static uint64_t mem_used, mem_total;
 static ULONGLONG last_idle, last_total;
 
@@ -51,6 +51,7 @@ static void sample(void)
         bat_pct = ps.BatteryLifePercent <= 100 ? ps.BatteryLifePercent : -1;
         bat_secs = ps.BatteryLifeTime != (DWORD)-1 ? (int)ps.BatteryLifeTime : -1;
     }
+    bat_mw = ph_battery_mw();
 }
 
 /* ---------- formatters ---------- */
@@ -105,6 +106,14 @@ static void f_battery(const ph_ctl *c, int32_t v, wchar_t *b, int n)
     if (bat_flag & 8) ph_swprintf(b, n, L"%d%%, charging", bat_pct);
     else if (on_ac == 0 && bat_secs > 0) ph_swprintf(b, n, L"%d%%, %d h %02d min left", bat_pct, bat_secs / 3600, bat_secs / 60 % 60);
     else ph_swprintf(b, n, L"%d%%", bat_pct);
+}
+
+/* the whole machine, while it runs on battery */
+static void f_draw(const ph_ctl *c, int32_t v, wchar_t *b, int n)
+{
+    (void)c; (void)v;
+    if (bat_mw < 0) lstrcpynW(b, L"--", n);
+    else ph_swprintf(b, n, L"%d.%d W", bat_mw / 1000, bat_mw % 1000 / 100);
 }
 
 static void f_pawnio(const ph_ctl *c, int32_t v, wchar_t *b, int n)
@@ -211,7 +220,7 @@ enum { R_SYS, R_MAKER, R_MODEL, R_BOARD, R_BIOS, R_WIN,
        R_CPU, R_NAME, R_CORES, R_TYPES, R_LOAD, R_CLOCK,
        R_MEMH, R_MEM,
        R_GPU, R_DISP, R_DEV,
-       R_BATH, R_SRC, R_BAT,
+       R_BATH, R_SRC, R_BAT, R_DRAW,
        R_SWH, R_PAWN, R_PM, R_FPS, R_N };
 
 static ph_ctl rows[R_N] = {
@@ -235,6 +244,7 @@ static ph_ctl rows[R_N] = {
     [R_BATH] = HDR(L"Power supply", O_BAT),
     [R_SRC] = ROW(L"Source", O_BAT + 1, ok, f_source, NULL),
     [R_BAT] = ROW(L"Battery", O_BAT + 2, ok, f_battery, NULL),
+    [R_DRAW] = ROW(L"Battery draw", O_BAT + 3, ok, f_draw, NULL),
     [R_SWH] = HDR(L"Software", O_SW),
     [R_PAWN] = ROW(L"PawnIO", O_SW + 1, ok, f_pawnio, NULL),
     [R_PM] = ROW(L"PresentMon", O_SW + 2, ok, f_pm, NULL),
@@ -296,6 +306,7 @@ static int hw_init(void)
     if (!s_types[0]) rows[R_TYPES].flags |= CF_HIDDEN;
     if (!ph_cpu_clk() || !ph_cpu_clk()->cur) rows[R_CLOCK].flags |= CF_HIDDEN;
     if (!has_battery()) rows[R_BAT].flags |= CF_HIDDEN;
+    if (bat_mw < 0) rows[R_DRAW].flags |= CF_HIDDEN;
     /* the copies first: they look at what is registered, not at this table */
     add_proxies(PG_CPU, O_CPU + 10);
     add_proxies(PG_GPU, O_GPU);
@@ -314,6 +325,8 @@ static void hw_tick(void)
     sync_proxies();
     if (has_battery()) rows[R_BAT].flags &= (uint16_t)~CF_HIDDEN;
     else rows[R_BAT].flags |= CF_HIDDEN;
+    if (bat_mw >= 0) rows[R_DRAW].flags &= (uint16_t)~CF_HIDDEN;
+    else rows[R_DRAW].flags |= CF_HIDDEN;
 }
 
 ph_backend bk_hwinfo = {

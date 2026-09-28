@@ -108,6 +108,15 @@ static void sample(void)
     if (s_temp < 0 && nv.temp && nv.temp(dev, NVML_TEMPERATURE_GPU, &v) == NVML_SUCCESS) s_temp = (int)v;
 }
 
+/* for AutoTDP: an NVIDIA GPU is always discrete, so its power adds to the package's */
+static int read_power(int *mw)
+{
+    unsigned int v;
+    if (!nv.power || nv.power(dev, &v) != NVML_SUCCESS) return -1;
+    *mw = (int)v;
+    return 0;
+}
+
 static int get_mhz(ph_ctl *c, int32_t *o) { sample(); *o = s_mhz; return s_mhz < 0 ? -1 : 0; }
 static int get_load(ph_ctl *c, int32_t *o) { sample(); *o = s_load; return s_load < 0 ? -1 : 0; }
 static int get_mw(ph_ctl *c, int32_t *o) { sample(); *o = s_mw; return s_mw < 0 ? -1 : 0; }
@@ -354,6 +363,7 @@ static int nv_init(void)
 
     unsigned int v;
     if (!nv.power || nv.power(dev, &v) != NVML_SUCCESS) ctls[C_PWR].flags |= CF_HIDDEN;
+    else ph_set_power_reader(PWR_GPU, read_power);
     sample();
     if (s_temp < 0) ctls[C_TEMP].flags |= CF_HIDDEN;
 

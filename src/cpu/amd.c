@@ -256,6 +256,15 @@ static void fmt_s(const ph_ctl *c, int32_t v, wchar_t *b, int n)
     ph_swprintf(b, n, L"%d s", v);
 }
 
+/* for AutoTDP: APU power (CPU and iGPU together) from the PM table */
+static int read_power(int *mw)
+{
+    float f;
+    if (!smu_pm_ok() || smu_pm_refresh() || smu_pm_get(PM_FAST_VAL, &f) || f < 0.0f || f >= 400.0f) return -1;
+    *mw = (int)(f * 1000.0f);
+    return 0;
+}
+
 static int get_power(ph_ctl *c, int32_t *out) { *out = pwr_mw; return pwr_mw < 0 ? -1 : 0; }
 static int get_temp(ph_ctl *c, int32_t *out)  { *out = temp_c; return temp_c < 0 ? -1 : 0; }
 
@@ -371,6 +380,7 @@ static int amd_init(void)
     sample();
     int t;
     if (read_temp(&t) == 0) ph_set_cpu_temp_reader(read_temp);
+    if (smu_pm_ok()) ph_set_power_reader(PWR_PKG, read_power);
     ph_register_ctls(ctls, C_N);
     return 0;
 }

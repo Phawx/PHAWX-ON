@@ -747,6 +747,10 @@ static void update_live(void)
         ph_swprintf(t, PH_ARRAY(t), L"Target %d", st.target);
         join(live, PH_ARRAY(live), t);
     }
+    if (run && st.power_mw > 0) {
+        ph_swprintf(t, PH_ARRAY(t), L"%d.%d W", st.power_mw / 1000, st.power_mw % 1000 / 100);
+        join(live, PH_ARRAY(live), t);
+    }
     if (!live[0]) lstrcpynW(live, run ? L"AutoTDP waiting for a game" : L"No game detected", PH_ARRAY(live));
 }
 

@@ -59,10 +59,20 @@ dist: $(OUT) $(PLUGINS)
 	cp plugins/sdk/phawx_plugin.h plugins/example/example.c plugins/example/example.rc docs/PLUGINS.md dist/PhawxON/sdk/
 	cd dist && rm -f PhawxON-$(VERSION).zip && zip -qr PhawxON-$(VERSION).zip PhawxON
 
+# AutoTDP against a simulated handheld (tests/autotdp_sim.c); off Windows it runs under wine
+SIM = build/autotdp_sim.exe
+$(SIM): tests/autotdp_sim.c src/autotdp.c src/phawx.h
+	@mkdir -p build
+	$(CC) -O2 -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type \
+		-DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 -Isrc -o $@ $< -luser32
+
+sim: $(SIM)
+	$(if $(filter Windows_NT,$(OS)),,WINEDEBUG=-all wine )$(SIM)
+
 version:
 	@echo $(VERSION)
 
 clean:
 	rm -rf build dist
 
-.PHONY: all plugins dist version clean
+.PHONY: all plugins dist version clean sim
