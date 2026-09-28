@@ -379,12 +379,13 @@ void *ph_alloc(size_t n);
 void  ph_free(void *p);
 
 /* ---------- power draw (power.c) ---------- */
-/* sys_mw is the whole machine, from the battery while it discharges; the parts come
-   from readers the backends register. -1 = unknown. */
-typedef struct ph_power { int sys_mw, pkg_mw, gpu_mw; } ph_power;
+/* sys_mw is the whole machine, from the battery while it discharges off AC; the
+   parts come from readers the backends register, and parts_mw is their sum when
+   every one of them answered. -1 = unknown. */
+typedef struct ph_power { int sys_mw, pkg_mw, gpu_mw, parts_mw; } ph_power;
 enum { PWR_PKG, PWR_GPU, PWR_KINDS };          /* CPU package or APU; a discrete GPU */
 enum { PSRC_NONE, PSRC_PARTS, PSRC_SYSTEM };    /* where a total came from */
-void ph_set_power_reader(int kind, int (*fn)(int *mw));
+void ph_set_power_reader(int kind, int (*fn)(int *mw));   /* the first one per kind; NULL removes it */
 int  ph_power_read(ph_power *p);                /* 0 if anything was read */
 int  ph_battery_mw(void);                       /* the battery's discharge rate alone, -1 on AC */
 int  ph_power_total(const ph_power *p, int *src);   /* battery, else package + GPU; -1 */

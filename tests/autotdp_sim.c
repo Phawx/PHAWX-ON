@@ -365,7 +365,8 @@ int ph_power_read(ph_power *p)
     p->sys_mw = S->bat_upd ? bat_val : -1;
     p->pkg_mw = S->parts ? (int)(parts * 1000.0 * (1.0 + nrand() * 0.02)) : -1;
     p->gpu_mw = -1;
-    return p->sys_mw >= 0 || p->pkg_mw >= 0 ? 0 : -1;
+    p->parts_mw = p->pkg_mw;
+    return p->sys_mw >= 0 || p->parts_mw >= 0 ? 0 : -1;
 }
 
 /* the CPU's time per logical CPU, as NtQuerySystemInformation(8) gives it */

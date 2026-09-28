@@ -254,6 +254,8 @@ static HMODULE load_nvml(void)
 
 static void unload(void)
 {
+    ph_set_power_reader(PWR_GPU, NULL);
+    nv.power = NULL;
     if (inited && nv.shutdown) nv.shutdown();
     inited = 0;
     if (lib) FreeLibrary(lib);

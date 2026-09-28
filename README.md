@@ -42,7 +42,7 @@ See [docs/FEATURES.md](docs/FEATURES.md) in the repository for the full feature 
   - Watches the foreground game's FPS through PresentMon, and detects whether the CPU or the GPU is the bottleneck.
   - Raises CPU or GPU clocks quickly when FPS drops, and lowers them slowly once FPS is stable.
   - Looks for the fewest cores Windows needs to keep unparked (per core type on hybrid CPUs), and for the highest EPP that still holds the frame rate.
-  - Measures the power draw: the battery's discharge rate (the whole machine) on battery, the CPU package and a discrete GPU otherwise. Fewer cores or a higher EPP is kept only when the machine then draws less.
+  - Measures the power draw: the battery's discharge rate (the whole machine) on battery without a charger, the CPU package and a discrete GPU otherwise. Fewer cores or a higher EPP is kept only when the machine then draws less.
   - Target can be the refresh rate, half the refresh rate, or a custom value.
 - **Per-game profiles** (off by default). Save the current settings for the game in front. They load automatically whenever that game is in the foreground.
 - **Display.** Refresh rate and resolution.

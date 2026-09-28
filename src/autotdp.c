@@ -250,7 +250,7 @@ static int cpu_util(int *maxp, int *avgp)
 typedef BOOL (WINAPI *pfn_cpusets)(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE, ULONG);
 static pfn_cpusets cpusets;
 static int cpusets_tried;
-static BYTE cs_buf[256 * sizeof(SYSTEM_CPU_SET_INFORMATION)];
+static SYSTEM_CPU_SET_INFORMATION cs_buf[256];
 static int act[2] = { -1, -1 };     /* unparked cores per class, latest */
 static int8_t act_ring[8][2];       /* the last two seconds */
 static int act_n, act_i;
@@ -266,15 +266,13 @@ static int unparked(int out[2])
         if (m) cpusets = (pfn_cpusets)(void *)GetProcAddress(m, "GetSystemCpuSetInformation");
     }
     ULONG len = 0;
-    if (!cpusets || !cpusets((PSYSTEM_CPU_SET_INFORMATION)(void *)cs_buf, sizeof cs_buf, &len, NULL, 0) ||
-        len > sizeof cs_buf)
-        return -1;
+    if (!cpusets || !cpusets(cs_buf, sizeof cs_buf, &len, NULL, 0) || len > sizeof cs_buf) return -1;
     uint8_t seen[4][256];
     memset(seen, 0, sizeof seen);
     int any = 0;
     out[0] = out[1] = 0;
     for (ULONG off = 0; off + 8 <= len;) {
-        const SYSTEM_CPU_SET_INFORMATION *e = (const SYSTEM_CPU_SET_INFORMATION *)(const void *)(cs_buf + off);
+        const SYSTEM_CPU_SET_INFORMATION *e = (const SYSTEM_CPU_SET_INFORMATION *)(const void *)((const BYTE *)cs_buf + off);
         if (e->Size < 24 || off + e->Size > len) break;
         if (e->Type == CpuSetInformation) {
             uint8_t *s = &seen[e->CpuSet.Group & 3][e->CpuSet.CoreIndex];
@@ -333,7 +331,7 @@ static void pw_sample(uint64_t now)
     int sys = -1, parts = -1;
     if (ph_power_read(&p) == 0) {
         sys = p.sys_mw;
-        if (p.pkg_mw >= 0 || p.gpu_mw >= 0) parts = IMAX(p.pkg_mw, 0) + IMAX(p.gpu_mw, 0);
+        parts = p.parts_mw;
     }
     /* how often the battery's reading changes sets how long a trial waits for it */
     if (sys < 0) sys_t = 0;
@@ -894,7 +892,6 @@ static DWORD WINAPI worker(LPVOID p)
         last_tick = now;
         sync_cfg();
         kn_sync();
-        pw_sample(now);
 
         ph_clk *g = ph_gpu_clk();
         if (!dom_usable(g)) g = NULL;
@@ -960,6 +957,8 @@ static DWORD WINAPI worker(LPVOID p)
             below_n = 0;
         }
         wait = 50;
+        /* only with a game: every reading wakes the SMU, the GPU or the EC */
+        pw_sample(now);
 
         float fast = f.fps_fast > 0.0f ? f.fps_fast : f.fps;
         ff = ff > 0.0f ? ff * 0.5f + fast * 0.5f : fast;
@@ -1389,7 +1388,7 @@ static void fmt_power(const ph_ctl *c, int32_t v, wchar_t *b, int n)
     autotdp_state(&s);
     if (n < 1) return;
     b[0] = 0;
-    if (!s.running) { lstrcpynW(b, L"--", n); return; }
+    if (!s.running || s.fps <= 0.0f) { lstrcpynW(b, L"--", n); return; }
     if (s.power_mw >= 0) {
         ph_swprintf(t, PH_ARRAY(t), L"%d.%d W%s", s.power_mw / 1000, s.power_mw % 1000 / 100,
                     s.power_src == PSRC_SYSTEM ? L" system" : L" CPU+GPU");
