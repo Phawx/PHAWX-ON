@@ -1,3 +1,10 @@
+Phawx ON 1.4
+
+New
+- **Core sliders on the Quick page.** How many cores Windows may keep unparked, as a count: **P-cores** and **E-cores** on hybrid CPUs, **Cores** on CPUs with one kind of core ("4 of 6"). They replace the *max unparked* percentages on the CPU page; a saved global value is carried over. AutoTDP never goes above what you set here.
+- **Watch AutoTDP work.** While it runs, the sliders it manages (CPU and GPU max clock, EPP, cores) show the value it has set right now and glide as it changes them. The one it is trying turns amber and reads *Trying …*. Settings it is not managing stay adjustable: the cores when *Find the fewest cores* is off, EPP when it is left to Windows.
+- **UI scale** in Settings: make the overlay smaller or larger, 75–200 %.
+
 Phawx ON 1.3
 
 New

@@ -137,7 +137,7 @@ static void profile_switch(const wchar_t *exe)
     if (exe && exe[0]) cfg_load_profile(exe);
     for (int i = 0; was && i < n; i++) {
         ph_ctl *c = ph_ctl_at(i);
-        if (was[i] && !c->active && !((c->flags & CF_AUTOTDP) && autotdp_running())) ph_ctl_reset(c);
+        if (was[i] && !c->active && !autotdp_owns(c)) ph_ctl_reset(c);
     }
     ph_free(was);
     if (exe && exe[0]) lstrcpynW(cur_profile, exe, PH_ARRAY(cur_profile));
@@ -235,6 +235,7 @@ static int set_autostart(ph_ctl *c, int32_t v) { (void)c; return app_autostart_s
 static int get_autostart(ph_ctl *c, int32_t *o) { (void)c; *o = app_autostart_get(); return 0; }
 static int act_combo(ph_ctl *c, int32_t v) { (void)c; (void)v; input_capture_combo(); ui_toast(L"Hold the new button combo..."); return 0; }
 static int set_adv(ph_ctl *c, int32_t v) { (void)c; advanced = v; ui_refresh(); return 0; }
+static int set_uiscale(ph_ctl *c, int32_t v) { (void)c; ui_set_scale(v); return 0; }
 static int act_quit(ph_ctl *c, int32_t v) { (void)c; (void)v; app_quit(); return 0; }
 static int act_reset_all(ph_ctl *c, int32_t v)
 {
@@ -281,6 +282,8 @@ static ph_ctl app_ctls[] = {
     { .key = "app.combo", .label = L"Open menu combo", .type = CT_ACTION, .page = PG_SETTINGS, .set = act_combo, .fmt = fmt_combo, .flags = CF_NOSAVE, .order = 1 },
     { .key = "app.autostart", .label = L"Start with Windows", .type = CT_TOGGLE, .page = PG_SETTINGS, .set = set_autostart, .get = get_autostart, .flags = CF_NOSAVE, .order = 2 },
     { .key = "app.advanced", .label = L"Show advanced options", .type = CT_TOGGLE, .page = PG_SETTINGS, .set = set_adv, .order = 3 },
+    { .key = "app.uiscale", .label = L"UI scale", .type = CT_SLIDER, .page = PG_SETTINGS, .min = 75, .max = 200, .step = 5,
+      .def = 100, .unit = L"%", .fmt = fmt_pct, .set = set_uiscale, .order = 4 },
     { .key = NULL, .label = L"Profiles", .type = CT_HEADER, .page = PG_SETTINGS, .order = 10 },
     { .key = "app.profiles", .label = L"Per-game profiles", .type = CT_TOGGLE, .page = PG_SETTINGS, .def = 0, .set = set_profiles, .order = 11 },
     { .key = "app.saveprof", .label = L"Save profile for current game", .type = CT_ACTION, .page = PG_SETTINGS, .set = act_save_profile, .flags = CF_NOSAVE, .order = 12 },
@@ -503,6 +506,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
     ph_register_ctls(app_ctls, PH_ARRAY(app_ctls));
     cfg_load();
     autotdp_cfg_loaded();
+    wp_cfg_loaded();
     pins_load();
     /* 1.1 turned per-game profiles off by default; keep them switching for anyone
        who already saved one under 1.0 (asked once, so a later Default sticks) */

@@ -12,7 +12,7 @@
 #define IND     20      /* label indent: the pin column */
 #define PIN_HIT 22      /* taps left of PAD + this hit the pin */
 
-enum { TM_ANIM = 1, TM_LIVE, TM_COMMIT, TM_TOAST, TM_HOLD };
+enum { TM_ANIM = 1, TM_LIVE, TM_COMMIT, TM_TOAST, TM_HOLD, TM_EASE };
 enum { WM_UI_SHOW = WM_APP + 40, WM_UI_TOAST, WM_UI_NAV, WM_UI_REFRESH, WM_UI_HOLD };
 enum { DR_NONE, DR_TAP, DR_SCROLL, DR_SLIDER, DR_CANCEL, DR_CURVE };   /* DR_CANCEL: slid off its tap */
 
@@ -25,6 +25,7 @@ enum { DR_NONE, DR_TAP, DR_SCROLL, DR_SLIDER, DR_CANCEL, DR_CURVE };   /* DR_CAN
 #define C_FAINT  RGB(96, 96, 108)
 #define C_ACC    RGB(64, 214, 128)
 #define C_TRACK  RGB(74, 74, 86)
+#define C_TRY    RGB(240, 188, 72)      /* a value AutoTDP is trying right now */
 #define C_DANGER RGB(240, 98, 86)
 #define C_SHADE  RGB(14, 14, 17)
 #define C_TOAST  RGB(58, 60, 72)
@@ -73,9 +74,16 @@ static wchar_t toast_msg[160];
 static int toast_on, toast_seq, toast_dpi;
 static HFONT toast_font;
 static wchar_t live[160];
-static int live_n;
 
 static int drag, down_x, down_y, down_scroll, down_row;
+
+/* rows AutoTDP holds: the knob glides to the value it sets instead of jumping */
+static float ease_v[MAXROWS];
+static uint8_t ease_ok[MAXROWS];
+static int easing, live_ms;
+static uint64_t last_tick;
+
+static int ui_scale = 100;              /* Settings -> UI scale, % */
 
 /* the fan curve being edited: its point under the cursor, and whether up / down
    change that point (A starts and ends editing) */
@@ -83,6 +91,7 @@ static int cpt = 3;
 static ph_ctl *cedit;
 
 static int S(int v) { return MulDiv(v, dpi, 96); }
+static int scaled_dpi(HMONITOR m);
 static int on_ui(void) { return GetCurrentThreadId() == ui_tid; }
 static int top_y(void) { return S(HDR_H + TAB_H); }
 static int view_h(void) { return ph_h - S(HDR_H + TAB_H + FOOT_H); }
@@ -105,6 +114,16 @@ static int mon_dpi(HMONITOR m)
     int d = GetDeviceCaps(dc, LOGPIXELSX);
     ReleaseDC(NULL, dc);
     return d > 0 ? d : 96;
+}
+
+static int scaled_dpi(HMONITOR m) { return MulDiv(mon_dpi(m), ui_scale, 100); }
+
+void ui_set_scale(int pct)
+{
+    pct = PH_CLAMP(pct, 50, 250);
+    if (pct == ui_scale) return;
+    ui_scale = pct;
+    ui_refresh();
 }
 
 static HMONITOR target_monitor(void)
@@ -182,7 +201,7 @@ static int row_visible(const ph_ctl *c)
 }
 
 static int selectable(const ph_ctl *c) { return c->type != CT_HEADER && c->type != CT_INFO && c->type != CT_STATUS; }
-static int locked(const ph_ctl *c) { return (c->flags & CF_AUTOTDP) && c->type != CT_INFO && autotdp_running(); }
+static int locked(const ph_ctl *c) { return c->type != CT_INFO && autotdp_owns(c); }
 
 /* a persisted setting a long press resets; rows without a key (plugin switches,
    links) have nothing to reset */
@@ -338,6 +357,7 @@ static int first_sel(int from, int dir)
 static void rebuild(void)
 {
     ph_ctl *keep = (sel >= 0 && sel < nrows) ? rows[sel] : NULL;
+    memset(ease_ok, 0, sizeof ease_ok);
     ntabs = 0;
     for (int pg = 0; pg < PG_COUNT; pg++)
         if (page_rows(pg, tmp_rows) > 0) tabs[ntabs++] = pg;
@@ -802,7 +822,15 @@ static COLORREF value_text(int i, wchar_t *b, int n)
 {
     ph_ctl *c = rows[i];
     b[0] = 0;
-    if (locked(c)) { lstrcpynW(b, L"AutoTDP", n); return C_ACC; }
+    if (locked(c)) {
+        int32_t lv;
+        int l = autotdp_live(c, &lv);
+        if (!l) { lstrcpynW(b, L"AutoTDP", n); return C_ACC; }
+        wchar_t t[64];
+        fmt_val(c, lv, t, PH_ARRAY(t));
+        ph_swprintf(b, n, l == 2 ? L"Trying %s" : L"AutoTDP \x00B7 %s", t);
+        return l == 2 ? C_TRY : C_ACC;
+    }
     if (pend == c) { fmt_val(c, pend_v, b, n); return C_TEXT; }
     if (c->type == CT_INFO) { fmt_val(c, hwok[i] ? hwv[i] : c->val, b, n); return C_TEXT; }
     if (c->type == CT_ACTION) { if (c->fmt) c->fmt(c, c->val, b, n); return C_DIM; }
@@ -994,7 +1022,8 @@ static void draw_row(HDC m, int i, int y)
     if (i == sel) rrect(m, S(8), y + S(2), pw - S(8), y + h - S(2), S(12), C_SEL);
     if (c->type == CT_STATUS) { draw_status(m, i, y, h, x0, x1); return; }
     if (c->type == CT_CURVE) { draw_curve(m, i, y, h, x0, x1); draw_hold(m, i, y, h); return; }
-    COLORREF lc = lk ? C_FAINT : (c->flags & CF_DANGER) ? C_DANGER : C_TEXT;
+    int32_t lv_;
+    COLORREF lc = lk ? (autotdp_live(c, &lv_) ? C_DIM : C_FAINT) : (c->flags & CF_DANGER) ? C_DANGER : C_TEXT;
     COLORREF vc = value_text(i, v, PH_ARRAY(v));
     int vw = v[0] ? text_w(m, f_body, v) : 0;
 
@@ -1021,16 +1050,30 @@ static void draw_row(HDC m, int i, int y)
         text(m, f_body, lc, c->label, x0, lt, vx - S(8), lb, DT_LEFT);
         text(m, f_body, vc, v, vx, lt, x1, lb, DT_RIGHT);
         if (two) text(m, f_small, tone_color(tone), sub, x0, st, x1, sb, DT_LEFT);
-        int32_t cv = pend == c ? pend_v : base_val(i);
+        int32_t cv = pend == c ? pend_v : base_val(i), lv;
         int range = c->max - c->min, kx0, kx1;
         int ty = y + S(two ? 60 : 46);
+        int live = lk ? autotdp_live(c, &lv) : 0;
+        float fv = (float)cv;
+        if (live) {
+            /* where AutoTDP has it, gliding there over a few frames */
+            float tv = (float)PH_CLAMP(lv, c->min, c->max);
+            if (!ease_ok[i]) { ease_v[i] = tv; ease_ok[i] = 1; }
+            float d = tv - ease_v[i], eps = range > 0 ? (float)range * 0.003f : 0.5f;
+            if (d > eps || d < -eps) { ease_v[i] += d * 0.25f; easing = 1; }
+            else ease_v[i] = tv;
+            fv = ease_v[i];
+        } else {
+            ease_ok[i] = 0;
+        }
         track_x(&kx0, &kx1);
-        int kx = range > 0 ? kx0 + (int)((int64_t)(cv - c->min) * (kx1 - kx0) / range) : kx0;
+        int kx = range > 0 ? kx0 + (int)((fv - (float)c->min) * (float)(kx1 - kx0) / (float)range) : kx0;
         kx = PH_CLAMP(kx, kx0, kx1);
         int on = (c->active || pend == c) && !lk;
+        COLORREF fillc = live == 2 ? C_TRY : live ? C_ACC : on ? C_ACC : C_FAINT;
         rrect(m, kx0, ty - S(2), kx1, ty + S(2), S(4), C_TRACK);
-        rrect(m, kx0, ty - S(2), kx, ty + S(2), S(4), on ? C_ACC : C_FAINT);
-        circle(m, kx, ty, S(8), lk ? C_FAINT : on ? C_TEXT : C_DIM);
+        rrect(m, kx0, ty - S(2), kx, ty + S(2), S(4), fillc);
+        circle(m, kx, ty, S(8), live ? C_TEXT : lk ? C_FAINT : on ? C_TEXT : C_DIM);
         break;
     }
     case CT_TOGGLE: {
@@ -1172,6 +1215,7 @@ static void layout_tabs(HDC m)
 static void render(HDC m)
 {
     int t = top_y(), vh = view_h();
+    easing = 0;
     SetBkMode(m, TRANSPARENT);
     fill(m, 0, 0, pw, ph_h, C_BG);
 
@@ -1243,6 +1287,8 @@ static void on_paint(void)
         BitBlt(dc, 0, 0, shown_w, ph_h, bb_dc, 0, 0, SRCCOPY);
     }
     EndPaint(hw, &ps);
+    if (easing) SetTimer(hw, TM_EASE, 16, NULL);
+    else KillTimer(hw, TM_EASE);
 }
 
 /* ---------- show / hide ---------- */
@@ -1253,7 +1299,7 @@ static void place(void)
     MONITORINFO mi = { sizeof mi };
     if (!GetMonitorInfoW(hm, &mi)) SystemParametersInfoW(SPI_GETWORKAREA, 0, &mi.rcWork, 0);
     mon = mi.rcWork;
-    dpi = mon_dpi(hm);
+    dpi = scaled_dpi(hm);
     make_fonts();
     pw = S(UI_W);
     if (pw > mon.right - mon.left) pw = mon.right - mon.left;
@@ -1319,8 +1365,9 @@ void ui_show(int show)
         fps_start();
         input_menu_open(1);
         update_live();
-        live_n = 0;
-        SetTimer(hw, TM_LIVE, 500, NULL);
+        last_tick = 0;
+        live_ms = autotdp_running() ? 250 : 500;
+        SetTimer(hw, TM_LIVE, (UINT)live_ms, NULL);
         if (!IsWindowVisible(hw)) shown_w = 0;
         anim_dir = 1;
         if (!shown_w) set_shown(1);
@@ -1334,6 +1381,7 @@ void ui_show(int show)
         if (GetCapture() == hw) ReleaseCapture();
         hold_end();
         KillTimer(hw, TM_LIVE);
+        KillTimer(hw, TM_EASE);
         InterlockedExchange(&vis, 0);
         input_menu_open(0);
         if (!autotdp_running()) fps_stop();
@@ -1393,7 +1441,7 @@ static void show_toast_window(void)
     HMONITOR hm = target_monitor();
     MONITORINFO mi = { sizeof mi };
     if (!GetMonitorInfoW(hm, &mi)) return;
-    int d = mon_dpi(hm);
+    int d = scaled_dpi(hm);
     if (!toast_font || toast_dpi != d) {
         if (toast_font) DeleteObject(toast_font);
         toast_font = mk_font(MulDiv(15, d, 96), FW_NORMAL);
@@ -1756,13 +1804,23 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         case TM_COMMIT: commit_pending(); break;
         case TM_TOAST: KillTimer(h, TM_TOAST); toast_on = 0; inval(); break;
         case TM_HOLD: hold_tick(); break;
-        case TM_LIVE:
+        case TM_LIVE: {
             if (!vis) { KillTimer(h, TM_LIVE); break; }
+            /* faster while AutoTDP runs, so its sliders follow it closely */
+            int want = autotdp_running() ? 250 : 500;
+            if (want != live_ms) { live_ms = want; SetTimer(h, TM_LIVE, (UINT)want, NULL); }
             update_live();
-            if (++live_n & 1) {
+            uint64_t now = ph_ms();
+            if (!last_tick || now - last_tick >= 950) {
+                last_tick = now;
                 ph_backends_tick();
                 refresh_hw(1);
             }
+            inval();
+            break;
+        }
+        case TM_EASE:
+            if (!vis) { KillTimer(h, TM_EASE); break; }
             inval();
             break;
         }

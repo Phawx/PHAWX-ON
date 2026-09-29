@@ -86,6 +86,7 @@ void fps_stop(void) {}
 int fps_status(void) { return 2; }
 int display_refresh(void) { return 60; }
 void wp_commit(void) {}
+void wp_park_rounds_up(void) {}
 
 static int cap_cpu, cap_gpu;
 
@@ -511,6 +512,8 @@ static void machine(int hybrid)
     g_plat.max_class = hybrid ? 1 : 0;
     g_plat.n_class1 = hybrid ? NP * 2 : 0;
     g_plat.n_class0 = hybrid ? NE : NP * 2;
+    g_plat.ncores1 = hybrid ? NP : 0;
+    g_plat.ncores0 = hybrid ? NE : NP;
 }
 
 static int restored(const char *when, int epp)
@@ -569,6 +572,23 @@ static int run(int idx, int cores, int epp_mode, double *power, int mode)
     fmt_status(NULL, 0, st1, 128);
     fmt_power(NULL, 0, st2, 128);
     int end_c = cap_cpu, end_g = cap_gpu, end_np = cur_np(), end_ne = cur_ne(), end_epp = epp_now();
+    /* what the sliders show is what AutoTDP applied */
+    if (!s->quit_s) {
+        ph_ctl pc = { .key = "cpu.cores_p", .flags = CF_AUTOTDP }, ec = { .key = s->hybrid ? "cpu.cores_e" : "cpu.cores", .flags = CF_AUTOTDP };
+        ph_ctl ep = { .key = "power.epp", .flags = CF_AUTOTDP }, mn = { .key = "cpu.parkmin", .flags = CF_AUTOTDP };
+        int32_t v;
+        int bad = 0;
+        publish(ph_ms(), 0, (float)fps_avg, -1, -1.0f, 0);
+        if (autotdp_live(&ctls[K_CPUMAX], &v) == 0 || v != cap_cpu) bad = 1;
+        if (autotdp_live(&ctls[K_GPUMAX], &v) == 0 || v != cap_gpu) bad = 2;
+        if (!autotdp_live(&ep, &v) || v != end_epp) bad = 3;
+        /* a kind of core it does not manage (at its floor already, as the user set) stays the user's */
+        if (s->hybrid && (kn[KN_CORE1].on ? !autotdp_live(&pc, &v) || v != kn[KN_CORE1].cur : autotdp_owns(&pc))) bad = 4;
+        if (kn[KN_CORE0].on ? !autotdp_live(&ec, &v) || v != kn[KN_CORE0].cur : autotdp_owns(&ec)) bad = 5;
+        if (!cores && (autotdp_owns(&pc) || autotdp_owns(&ec))) bad = 6;   /* not its to hold */
+        if (autotdp_live(&mn, &v)) bad = 7;                                  /* a percentage, no live count */
+        if (bad) { printf("    FAIL the sliders would not show what AutoTDP applied (%d)\n", bad); ok = 0; }
+    }
     if (s->crash) {
         autotdp_crash_release(GetCurrentThreadId());
         ok &= restored("after a crash", 33);

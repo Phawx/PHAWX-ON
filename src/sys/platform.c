@@ -130,10 +130,17 @@ static void detect_topology(void)
     g_plat.ncores = core;
     g_plat.max_class = core ? maxc : 0;
     g_plat.hybrid = core && maxc != minc;
-    g_plat.n_class0 = g_plat.n_class1 = 0;
+    g_plat.n_class0 = g_plat.n_class1 = g_plat.ncores0 = g_plat.ncores1 = 0;
+    uint8_t seen[256] = { 0 };
     for (int i = 0; i < g_plat.nlogical; i++) {
-        if (g_plat.hybrid && g_plat.cls[i] == g_plat.max_class) g_plat.n_class1++;
+        int p = g_plat.hybrid && g_plat.cls[i] == g_plat.max_class;
+        if (p) g_plat.n_class1++;
         else g_plat.n_class0++;
+        if (!seen[g_plat.core_of[i]]) {
+            seen[g_plat.core_of[i]] = 1;
+            if (p) g_plat.ncores1++;
+            else g_plat.ncores0++;
+        }
     }
 }
 

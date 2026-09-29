@@ -495,14 +495,7 @@ static int kn_home(void)
 
 static void kn_setup(void)
 {
-    uint8_t seen[256] = { 0 };
-    int n[2] = { 0, 0 };
-    for (int i = 0; i < g_plat.nlogical && i < 256 && g_plat.ncores > 0; i++) {
-        int c = g_plat.core_of[i];
-        if (seen[c]) continue;
-        seen[c] = 1;
-        n[g_plat.hybrid && g_plat.cls[i] == g_plat.max_class]++;
-    }
+    int n[2] = { g_plat.ncores0, g_plat.ncores1 };
     memset(kn, 0, sizeof kn);
     for (int i = KN_CORE0; i <= KN_CORE1; i++) {
         /* never more cores than the plan already allows (the user's own limit) */
@@ -729,6 +722,7 @@ static void tr_step(uint64_t now, float low1)
         int a = fresh ? act[tr.kind - TK_CORE0] : -1;
         if (a >= 0 && !park_up && a == k->cur + 1 && k->cur * 100 % k->n) {
             park_up = 1;
+            wp_park_rounds_up();
             ph_log("autotdp: Windows rounds core parking up");
             tr.t = now;
             return;
@@ -876,6 +870,7 @@ static void publish(uint64_t now, int target, float fps, int cmax, float gs, int
     st.cores_max = kn[KN_CORE0].on || kn[KN_CORE1].on ? cores_max : 0;
     st.cores = kn[KN_CORE0].cur + kn[KN_CORE1].cur;
     st.cores_on = act[0] >= 0 ? act[0] + act[1] : -1;
+    for (int i = 0; i < 2; i++) st.cores_c[i] = kn[i].on ? kn[i].cur : -1;
     st.epp = kn[KN_EPP].applied;
     st.trial = tr.kind;
     UL();
@@ -1171,7 +1166,7 @@ static int start_locked(void)
     LK();
     memset(&st, 0, sizeof st);
     st.running = 1;
-    st.cpu_util = st.gpu_util = st.power_mw = st.cores_on = st.epp = -1;
+    st.cpu_util = st.gpu_util = st.power_mw = st.cores_on = st.epp = st.cores_c[0] = st.cores_c[1] = -1;
     UL();
     fps_start();
     InterlockedExchange(&running, 1);
@@ -1254,6 +1249,50 @@ void autotdp_state(ph_auto_state *s)
     *s = st;
     s->running = running != 0;
     UL();
+}
+
+/* ---------- what the UI shows of it ---------- */
+
+static int key_is(const ph_ctl *c, const char *k) { return c->key && !strcmp(c->key, k); }
+
+static int epp_row(const ph_ctl *c) { return key_is(c, "power.epp") || key_is(c, "cpu.epp_p") || key_is(c, "cpu.epp_e"); }
+
+/* the core parking rows, by kind of core (1 = P), -1 for any other */
+static int core_row(const ph_ctl *c)
+{
+    if (key_is(c, "cpu.cores_p") || key_is(c, "cpu.parkmin_p")) return 1;
+    if (key_is(c, "cpu.cores_e") || key_is(c, "cpu.cores") || key_is(c, "cpu.parkmin")) return 0;
+    return -1;
+}
+
+/* AutoTDP holds this setting now: the UI locks it and profiles leave it alone. Its
+   clocks always; EPP unless it is left to Windows; the cores of a kind only while
+   AutoTDP looks for the fewest of them. */
+int autotdp_owns(const ph_ctl *c)
+{
+    if (!running || !c || !(c->flags & CF_AUTOTDP)) return 0;
+    if (epp_row(c)) return g_auto.epp_mode != EPP_LEAVE;
+    int k = core_row(c);
+    if (k < 0) return 1;
+    LK();
+    int on = st.cores_c[k] >= 0;
+    UL();
+    return on;
+}
+
+int autotdp_live(const ph_ctl *c, int32_t *out)
+{
+    if (!autotdp_owns(c)) return 0;
+    ph_auto_state s;
+    autotdp_state(&s);
+    int v = -1, kind = TK_NONE, k = core_row(c);
+    if (key_is(c, "auto.cpumax")) { v = s.cpu_mhz > 0 ? s.cpu_mhz : -1; kind = TK_CPU; }
+    else if (key_is(c, "auto.gpumax")) { v = s.gpu_mhz > 0 ? s.gpu_mhz : -1; kind = TK_GPU; }
+    else if (epp_row(c)) { v = s.epp; kind = TK_EPP; }
+    else if (k >= 0 && strncmp(c->key, "cpu.cores", 9) == 0) { v = s.cores_c[k]; kind = k ? TK_CORE1 : TK_CORE0; }
+    if (v < 0) return 0;
+    *out = v;
+    return s.fps > 0.0f && s.trial == kind ? 2 : 1;
 }
 
 /* ---------- control callbacks ---------- */

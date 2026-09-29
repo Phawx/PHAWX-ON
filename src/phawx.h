@@ -188,6 +188,7 @@ typedef struct ph_platform {
     int      nlogical, ncores;
     int      hybrid;                 /* has more than one efficiency class */
     int      n_class0, n_class1;     /* logical cpus in low (E) / high (P) efficiency class */
+    int      ncores0, ncores1;       /* physical cores in class 0 (E, or all of them) / class 1 (P) */
     uint8_t  cls[256];               /* efficiency class per logical processor */
     uint8_t  core_of[256];           /* physical core index per logical processor */
     int      max_class;
@@ -210,6 +211,8 @@ int  wp_set_epp(int cls, int pct);             /* cls 0 = base (E or all), 1 = "
 int  wp_get_epp(int cls);                      /* -1 unknown */
 int  wp_set_cores(int cls, int min_pct, int max_pct); /* core parking CPMIN/CPMAXCORES(1) */
 int  wp_set_freq_cap(int cls, int mhz);        /* PROCFREQMAX(1), 0 = none */
+void wp_park_rounds_up(void);                  /* AutoTDP saw Windows round CPMAXCORES up to whole cores */
+void wp_cfg_loaded(void);                      /* after cfg_load: carry over settings saved by older versions */
 
 /* ---------- display (sys/display.c) ---------- */
 int  display_refresh(void);                    /* current refresh of the foreground monitor */
@@ -261,6 +264,7 @@ typedef struct ph_auto_state {
     int   cores, cores_max;   /* cores AutoTDP lets Windows use, of cores_max (0 = not managed) */
     int   cores_on;       /* cores Windows has unparked now, -1 unknown */
     int   epp;            /* EPP AutoTDP set, -1 = Windows' own */
+    int   cores_c[2];     /* cores it lets Windows use per kind (0 = E or all, 1 = P); -1 = not managed */
     int   trial;          /* what it is trying now, 0 = nothing (autotdp.c) */
 } ph_auto_state;
 extern ph_auto_cfg g_auto;
@@ -271,6 +275,8 @@ int  autotdp_running(void);
 void autotdp_state(ph_auto_state *s);
 void autotdp_register_ctls(void);
 void autotdp_cfg_loaded(void);                   /* after cfg_load: find the saved GPU domain by name */
+int  autotdp_owns(const ph_ctl *c);              /* AutoTDP holds this setting now (locked in the UI) */
+int  autotdp_live(const ph_ctl *c, int32_t *out); /* the value it holds it at: 1, 2 = trying it now; 0 = none */
 
 /* ---------- config (config.c) ---------- */
 void cfg_load(void);
@@ -316,6 +322,7 @@ void ui_toggle(void);
 void ui_show(int show);
 void ui_show_page(int pg);
 int  ui_visible(void);
+void ui_set_scale(int pct);                   /* Settings -> UI scale, % of the monitor's own */
 void ui_nav(int action);
 void ui_hold(int src, int down);        /* HOLD_* source pressed / released */
 void ui_refresh(void);

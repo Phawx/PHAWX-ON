@@ -332,8 +332,7 @@ static wpm M_EPP = { &G_PERFEPP, &G_PERFEPP1 }, M_EPP0 = { &G_PERFEPP, NULL }, M
 static wpm M_BOOST = { &G_BOOSTMODE, NULL }, M_BOOSTPOL = { &G_BOOSTPOL, NULL };
 static wpm M_FREQ0 = { &G_FREQMAX, NULL }, M_FREQ1 = { &G_FREQMAX1, NULL };
 static wpm M_THRMIN = { &G_THRMIN, &G_THRMIN1 }, M_THRMAX = { &G_THRMAX, &G_THRMAX1 };
-static wpm M_CPMAX0 = { &G_CPMAX, NULL }, M_CPMIN0 = { &G_CPMIN, NULL };
-static wpm M_CPMAX1 = { &G_CPMAX1, NULL }, M_CPMIN1 = { &G_CPMIN1, NULL };
+static wpm M_CPMIN0 = { &G_CPMIN, NULL }, M_CPMIN1 = { &G_CPMIN1, NULL };
 static wpm M_SCHED = { &G_SCHED, NULL }, M_SHORT = { &G_SHORTSCHED, NULL }, M_HPOL = { &G_HETEROPOL, NULL };
 static wpm M_HINC = { &G_HETINCTIME, NULL }, M_HDEC = { &G_HETDECTIME, NULL };
 static wpm M_HC1 = { &G_HETC1INIT, NULL }, M_HC0 = { &G_HETC0FLOOR, NULL };
@@ -341,7 +340,7 @@ static wpm M_AUTO = { &G_AUTONOMOUS, NULL }, M_AWIN = { &G_AUTOWINDOW, NULL }, M
 static wpm M_LATP = { &G_LATPERF, &G_LATPERF1 }, M_LATU = { &G_LATUNPARK, &G_LATUNPARK1 };
 static wpm M_PCHK = { &G_PERFCHECK, NULL };
 
-enum { A_HYB = 1, A_EPP = 2, A_OV = 4 };
+enum { A_HYB = 1, A_EPP = 2, A_OV = 4, A_FLAT = 8 };   /* A_FLAT: only on CPUs with one kind of core */
 
 static int gen_set(ph_ctl *c, int32_t v)
 {
@@ -360,6 +359,46 @@ static int gen_get(ph_ctl *c, int32_t *out)
     *out = (int32_t)v;
     return 0;
 }
+
+/* ---------- how many cores Windows may keep unparked, as a count ---------- */
+
+typedef struct { const GUID *max, *min; int cls; } wcores;
+static wcores W_CORES0 = { &G_CPMAX, &G_CPMIN, 0 }, W_CORES1 = { &G_CPMAX1, &G_CPMIN1, 1 };
+static volatile LONG park_up;       /* Windows rounds CPMAXCORES up to whole cores, as AutoTDP found */
+
+void wp_park_rounds_up(void) { InterlockedExchange(&park_up, 1); }
+
+static int class_cores(int cls) { return cls ? g_plat.ncores1 : g_plat.ncores0; }
+
+/* the percentage for k of n cores: rounded up it gives at least k however Windows
+   rounds, and once Windows is known to round up, rounded down gives exactly k */
+static DWORD cores_pct(int k, int n) { return (DWORD)(park_up ? k * 100 / n : (k * 100 + n - 1) / n); }
+
+static int cores_set(ph_ctl *c, int32_t v)
+{
+    const wcores *w = c->ctx;
+    int n = class_cores(w->cls);
+    if (n <= 0) return -1;
+    DWORD pct = cores_pct(PH_CLAMP(v, 1, n), n), ac, dc;
+    if (write_ex(SUBP, w->max, pct, pct, c)) return -1;
+    /* a minimum above the new maximum would not make sense to Windows */
+    if (wp_read(SUBP, w->min, 0, &ac) == 0 && wp_read(SUBP, w->min, 1, &dc) == 0 && (ac > pct || dc > pct))
+        write_ex(SUBP, w->min, ac > pct ? pct : ac, dc > pct ? pct : dc, c);
+    return 0;
+}
+
+static int cores_get(ph_ctl *c, int32_t *out)
+{
+    const wcores *w = c->ctx;
+    int n = class_cores(w->cls);
+    DWORD v;
+    if (n <= 0 || wp_read(SUBP, w->max, !g_plat.on_ac, &v)) return -1;
+    int k = park_up ? (int)((v * (DWORD)n + 99) / 100) : (int)(v * (DWORD)n / 100);
+    *out = PH_CLAMP(k, 1, n);
+    return 0;
+}
+
+static void fmt_cores(const ph_ctl *c, int32_t v, wchar_t *b, int n) { ph_swprintf(b, n, L"%d of %d", v, c->max); }
 
 static const GUID *const ov_list[] = { &OV_BEST_EFF, &OV_BALANCED, &OV_BEST_PERF };
 
@@ -424,11 +463,18 @@ static const wchar_t *const mode_ch[] = { L"Best efficiency", L"Balanced", L"Bes
     { .key = k, .label = l, .type = CT_TOGGLE, .page = pg, .order = o, .flags = fl, .def = dflt, \
       .fmt = fmt_onoff, .get = gen_get, .set = gen_set, .ctx = &m, .arg = a }
 #define HD(l, pg, o, fl, a) { .key = NULL, .label = l, .type = CT_HEADER, .page = pg, .order = o, .flags = fl, .arg = a }
+#define CO(k, l, o, w, a) \
+    { .key = k, .label = l, .type = CT_SLIDER, .page = PG_QUICK, .order = o, .flags = OPTA, .min = 1, .max = 1, \
+      .step = 1, .def = 1, .fmt = fmt_cores, .get = cores_get, .set = cores_set, .ctx = &w, .arg = a }
 
 enum { I_FREQ0 = 3, I_FREQ1 = 4 };
 
 static ph_ctl ctls[] = {
     SL("power.epp", L"Energy preference (EPP)", PG_QUICK, 50, OPTA, 0, 100, 5, 33, L"%", fmt_pct, M_EPP, A_EPP),
+    /* cores Windows may keep unparked (CPMAXCORES), per kind of core */
+    CO("cpu.cores_p", L"P-cores", 55, W_CORES1, A_HYB),
+    CO("cpu.cores_e", L"E-cores", 56, W_CORES0, A_HYB),
+    CO("cpu.cores", L"Cores", 55, W_CORES0, A_FLAT),
     CH("power.boost", L"Boost mode", PG_QUICK, 70, OPT, boost_ch, 2, M_BOOST, 0),
     { .key = "power.mode", .label = L"Power mode", .type = CT_CHOICE, .page = PG_QUICK, .order = 80, .flags = OPT,
       .choices = mode_ch, .def = 1, .get = mode_get, .set = mode_set, .arg = A_OV },
@@ -441,9 +487,7 @@ static ph_ctl ctls[] = {
     SL("cpu.epp_e", L"E-core EPP", PG_CPU, 304, OPTA, 0, 100, 5, 33, L"%", fmt_pct, M_EPP0, A_HYB | A_EPP),
 
     HD(L"Core parking", PG_CPU, 310, 0, 0),
-    SL("cpu.parkmax_p", L"P-core max unparked", PG_CPU, 311, OPTA, 0, 100, 5, 100, L"%", fmt_pct, M_CPMAX1, A_HYB),
     SL("cpu.parkmin_p", L"P-core min unparked", PG_CPU, 312, OPTA, 0, 100, 5, 0, L"%", fmt_pct, M_CPMIN1, A_HYB),
-    SL("cpu.parkmax", L"Max unparked cores", PG_CPU, 313, OPTA, 0, 100, 5, 100, L"%", fmt_pct, M_CPMAX0, 0),
     SL("cpu.parkmin", L"Min unparked cores", PG_CPU, 314, OPTA, 0, 100, 5, 0, L"%", fmt_pct, M_CPMIN0, 0),
 
     HD(L"Hybrid scheduling", PG_CPU, 320, 0, A_HYB),
@@ -579,6 +623,26 @@ static void journal_recover(void)
     reg_del_value(HKEY_CURRENT_USER, JKEY, JOV);
 }
 
+/* 1.3 and before had "max unparked" in percent on the CPU page; it is now a count
+   of cores on the Quick page. A saved global value is carried over once. */
+static void migrate(const char *old, const char *key, int cls)
+{
+    int p = cfg_get_int("global", old, -1);
+    if (p < 0) return;
+    cfg_set_str("global", old, NULL);
+    ph_ctl *c = ph_ctl_find(key);
+    int n = class_cores(cls);
+    if (!c || c->active || (c->flags & CF_HIDDEN) || p > 100 || n < 2) return;
+    c->val = PH_CLAMP((p * n + 99) / 100, 1, n);
+    c->active = 1;
+}
+
+void wp_cfg_loaded(void)
+{
+    migrate("cpu.parkmax_p", "cpu.cores_p", 1);
+    migrate("cpu.parkmax", g_plat.hybrid ? "cpu.cores_e" : "cpu.cores", 0);
+}
+
 static int wp_init(void)
 {
     GUID sch;
@@ -591,14 +655,18 @@ static int wp_init(void)
     if (hyb) {
         ctls[I_FREQ0].label = L"E-core max clock";
         for (int i = 0; i < PH_ARRAY(ctls); i++) {
-            if (ctls[i].ctx == &M_CPMAX0) ctls[i].label = L"E-core max unparked";
-            else if (ctls[i].ctx == &M_CPMIN0) ctls[i].label = L"E-core min unparked";
+            if (ctls[i].ctx == &M_CPMIN0) ctls[i].label = L"E-core min unparked";
         }
     }
     for (int i = 0; i < PH_ARRAY(ctls); i++) {
         ph_ctl *c = &ctls[i];
         int hide = 0;
         if ((c->arg & A_HYB) && !hyb) hide = 1;
+        if ((c->arg & A_FLAT) && hyb) hide = 1;
+        if (c->get == cores_get) {
+            c->max = class_cores(((const wcores *)c->ctx)->cls);
+            if (c->max < 2) hide = 1;       /* one core: nothing to choose */
+        }
         if ((c->arg & A_EPP) && !g_plat.epp) hide = 1;
         if ((c->arg & A_OV) && (!p_set_ov || !p_get_ov)) hide = 1;
         if (c->ctx == &M_FREQ0 || c->ctx == &M_FREQ1) c->max = maxmhz;

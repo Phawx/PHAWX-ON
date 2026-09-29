@@ -119,7 +119,7 @@ void ph_apply_all(int reapply_only)
         if (!c->active || !c->set || (c->flags & CF_HIDDEN)) continue;
         if (c->type == CT_ACTION || c->type == CT_INFO || c->type == CT_HEADER || c->type == CT_CURVE) continue;
         if (reapply_only && !(c->flags & CF_REAPPLY)) continue;
-        if ((c->flags & CF_AUTOTDP) && autotdp_running()) continue;
+        if (autotdp_owns(c)) continue;
         L();
         c->set(c, c->val);
         U();

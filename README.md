@@ -28,7 +28,7 @@ See [docs/FEATURES.md](docs/FEATURES.md) in the repository for the full feature 
   - Intel: PL1/PL2 and their time windows, through MSR 0x610 with the real power units.
   - AMD Ryzen APUs (Raven through Strix Halo): sustained, boost, slow and APU slow limits, time constants and temperature limit, through the SMU.
 - **EPP.** Windows energy performance preference, set separately for P-cores and E-cores on hybrid CPUs.
-- **Hybrid cores.** Per-class core parking, per-class clock caps, and thread scheduling policy (prefer P or E cores).
+- **Cores.** On the Quick page, how many cores Windows may keep unparked: **P-cores** and **E-cores** on a hybrid CPU, **Cores** on one with a single kind, as a count ("4 of 6"). The CPU page has the minimum unparked, per-class clock caps and the thread scheduling policy (prefer P or E cores).
 - **CPU clocks.**
   - AMD: per-core CPPC max clock and the Core Performance Boost toggle.
   - Both vendors: the Windows maximum-frequency cap.
@@ -107,7 +107,7 @@ The overlay never takes focus from the game.
 
 Holding only resets saved settings. On a setting that is already at Default it just says *Already at Default*, and on a row locked by AutoTDP *Managed by AutoTDP*. On actions, links and the plugin switches a long press is an ordinary tap. A touch or click that moves more than about 10 pixels is not a tap or a hold: moving up or down scrolls, moving sideways cancels. Windows' own press-and-hold ring, pen feedback and flicks are turned off in the overlay.
 
-Changes take effect about half a second after you stop adjusting. Settings marked dangerous ask for confirmation first. Advanced options are hidden until you turn on **Settings → Show advanced options**.
+Changes take effect about half a second after you stop adjusting. Settings marked dangerous ask for confirmation first. Advanced options are hidden until you turn on **Settings → Show advanced options**. **Settings → UI scale** makes the overlay smaller or larger (75–200 % of the monitor's own scaling).
 
 The overlay never takes keyboard focus from the game, so while it is open Phawx ON watches the R key without taking it: the game sees R too. AutoTDP is turned on and off with the **Phawx ON** switch at the top of the Quick page, or from the tray icon.
 
@@ -133,14 +133,14 @@ Pinned settings are listed on the Quick page under **Pinned**, in the order you 
 2. Choose a target: refresh rate, half refresh, or custom FPS.
 3. Start a game.
 
-The status line shows current and target FPS, the CPU and GPU clocks, and which one is the bottleneck. **Power use** below it shows what the machine draws (*system* on battery, *CPU+GPU* otherwise), how many cores are unparked, the EPP, and what AutoTDP is trying at the moment. While AutoTDP runs, the clock, EPP and core parking controls it manages are locked and show "AutoTDP".
+The status line shows current and target FPS, the CPU and GPU clocks, and which one is the bottleneck. **Power use** below it shows what the machine draws (*system* on battery, *CPU+GPU* otherwise), how many cores are unparked, the EPP, and what AutoTDP is trying at the moment. While AutoTDP runs, the clock, EPP and core controls it manages are locked, and their sliders follow it live: they show the value AutoTDP has set right now ("AutoTDP · 2400 MHz", "AutoTDP · 4 of 6") and the knob glides as it changes. The one it is trying at the moment turns amber and reads "Trying …". Controls AutoTDP is not managing stay yours: the cores when **Find the fewest cores** is off, EPP when it is left to Windows.
 
 How it works:
 
 - **Clocks first.** When FPS falls short it raises the CPU or GPU clock cap at once (both when it is far off). While FPS holds it lowers them a step at a time. Far from the limit these are quick steps watched for dropped frames. Near it, each step is kept unless the power reading goes up, which happens below the voltage floor, where a lower clock only makes the chip busy for longer.
 - **Then cores and EPP**, one trial at a time, while the frame rate is steady. A trial parks one or more cores (**CPMAXCORES**, per core type on hybrid CPUs) or raises EPP by 20 (up to 60). The clocks may rise a little to make up for it. After it settles, AutoTDP compares the power with what it drew before. It keeps the change only if the machine now draws clearly less at the same frame rate and the 1% lows held, and otherwise puts back the setting and the clocks. A trial that saved nothing is tried again later with a bigger step, after 30 s, 1, 2 and then 4 minutes. A value that cost frames is left alone for 20 s, longer if it keeps failing.
 - **When frames fall short** with cores parked or EPP raised (and the GPU is not the limit), it goes back toward all cores and EPP 0 at once, all the way if it is far off.
-- **Floors.** At least two cores stay unparked, and on a hybrid CPU at least two P-cores and one E-core. It never allows more cores than your own **Max unparked cores** settings (or the power plan) already do. Phawx ON reads which cores Windows has really parked, so it skips limits that change nothing and adjusts to how Windows rounds the percentage.
+- **Floors.** At least two cores stay unparked, and on a hybrid CPU at least two P-cores and one E-core. It never allows more cores than your own **P-cores** / **E-cores** / **Cores** settings (or the power plan) already do. Phawx ON reads which cores Windows has really parked, so it skips limits that change nothing and adjusts to how Windows rounds the percentage.
 - **Timing.** A package reading settles in a second. A battery that only updates every few seconds makes each trial wait for a few updates. Without any power reading AutoTDP only parks cores where the GPU is clearly the limit and the CPU mostly idles, and leaves EPP at 0.
 - **Out of reach.** If the target cannot be reached even at full speed, AutoTDP holds what the machine does reach, a little under it, with the least power. Now and then it checks whether the target has become reachable again.
 - **No game.** The clock caps come off, and core parking and a tuned EPP go back to Windows' settings. If the same game shows frames again within a minute (a pause, alt-tab), the cores and EPP go back to where the search was. Everything is restored when AutoTDP stops, when Phawx ON exits, and after a crash.
