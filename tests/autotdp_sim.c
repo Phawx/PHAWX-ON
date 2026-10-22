@@ -94,11 +94,15 @@ static int cpu_set_max(ph_clk *d, int mhz) { (void)d; cap_cpu = mhz; return 0; }
 static int cpu_reset(ph_clk *d) { cap_cpu = d->max_mhz; return 0; }
 static int gpu_set_max(ph_clk *d, int mhz) { (void)d; cap_gpu = mhz; return 0; }
 static int gpu_reset(ph_clk *d) { cap_gpu = d->max_mhz; return 0; }
+/* the clocks the parts actually run at: under a package limit below their caps */
+static double run_cpu = 0, run_gpu = 0;
+static int cpu_cur(ph_clk *d, int *mhz) { (void)d; if (run_cpu <= 0) return -1; *mhz = (int)run_cpu; return 0; }
+static int gpu_cur(ph_clk *d, int *mhz) { (void)d; if (run_gpu <= 0) return -1; *mhz = (int)run_gpu; return 0; }
 
 static ph_clk cpu_clk = { .name = L"CPU", .min_mhz = 400, .max_mhz = 4800, .step_mhz = 100, .set_max = cpu_set_max,
-                          .reset = cpu_reset };
+                          .reset = cpu_reset, .cur = cpu_cur };
 static ph_clk gpu_clk = { .name = L"GPU", .min_mhz = 300, .max_mhz = 2000, .step_mhz = 50, .set_max = gpu_set_max,
-                          .reset = gpu_reset };
+                          .reset = gpu_reset, .cur = gpu_cur };
 
 ph_clk *ph_cpu_clk(void) { return &cpu_clk; }
 ph_clk *ph_gpu_clk(void) { return &gpu_clk; }
@@ -193,6 +197,7 @@ typedef struct {
     int   user_pmax;            /* the user's own "P-core max unparked" %, 0 = Windows' 100 */
     int   pause_s;              /* no frames for 5 s from this second (alt-tab), 0 = never */
     float pl_w;                 /* a package power limit CPU and GPU share (W), 0 = none */
+    int   pl_counter;           /* the package reports the throttling (MSR_PKG_PERF_STATUS); else only the clocks show it */
 } scen;
 
 static const scen *S;
@@ -317,6 +322,8 @@ static void plant(double dt)
     int np = cur_np(), ne = cur_ne();
     eval(cap_cpu, cap_gpu, np, ne, epp_now(), 1.0 + wob_c, 1.0 + wob_g, &now_pv);
     pv *o = &now_pv;
+    run_cpu = o->f_run;
+    run_gpu = cap_gpu * pl_k;
     double fps = game_on ? o->fps * (1.0 + nrand() * 0.01) : 0.0;
     fps_avg += (fps - fps_avg) * (1.0 - exp(-dt / 500.0));
     fps_fast += (fps - fps_fast) * (1.0 - exp(-dt / 150.0));
@@ -407,7 +414,7 @@ int ph_power_read(ph_power *p)
 /* the package held back by its power limit, as Intel's MSR_PKG_PERF_STATUS shows it */
 int ph_power_limited(int *pct)
 {
-    if (!game_on || !S->pl_w) return -1;
+    if (!game_on || !S->pl_w || !S->pl_counter) return -1;
     *pct = pl_k < 0.995 ? 100 : 0;
     return 0;
 }
@@ -551,8 +558,8 @@ static const scen scens[] = {
     { "user limits P-cores to 50%, hybrid", 1, 6, 12, 18, 4, 60, 60, 2000, 1, 1, 0, 1, 0, 500, 1, 0, 50 },
     { "no frames for 5 s at 400 s (alt-tab), hybrid", 1, 6, 12, 18, 4, 60, 60, 2000, 1, 1, 0, 1, 0, 600, 1, 0, 0, 400 },
     /* a handheld held at a low TDP: CPU and GPU share 15 W and the target is out of reach */
-    { "GPU-bound under a 15 W package limit, hybrid", 1, 8, 16, 40, 4, 0, 60, 2000, 1, 1, 0, 1, 0, 900, 0, 0, 0, 0, 15.0f },
-    { "CPU-bound under a 15 W package limit, target 120, hybrid", 1, 40, 30, 12, 4, 0, 120, 2000, 1, 1, 0, 1, 0, 900, 0, 0, 0, 0, 15.0f },
+    { "GPU-bound under a 15 W package limit (clocks show it), hybrid", 1, 8, 16, 40, 4, 0, 60, 2000, 1, 1, 0, 1, 0, 900, 0, 0, 0, 0, 15.0f, 0 },
+    { "CPU-bound under a 15 W package limit (counter shows it), target 120, hybrid", 1, 40, 30, 12, 4, 0, 120, 2000, 1, 1, 0, 1, 0, 900, 0, 0, 0, 0, 15.0f, 1 },
 };
 
 static void machine(int hybrid)

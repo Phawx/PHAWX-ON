@@ -420,7 +420,28 @@ static float fps_mean(uint64_t a, uint64_t b)
     return n >= 4 ? (float)(sum / n) : -1.0f;
 }
 
-/* held back by a power limit most of the last two seconds (Intel: MSR_PKG_PERF_STATUS) */
+/* Held back by a power limit most of the last two seconds. Two signals, whichever the
+   machine has: the package's own throttle counter (Intel MSR_PKG_PERF_STATUS; it stays
+   at 0 on some chips, Panther Lake among them), and the part that is the limit running
+   well below its clock cap while busy (the GPU's actual clock from the driver). */
+static int8_t held_ring[8];         /* 1 held below its cap, 0 not, -1 unknown; 250 ms apart */
+static int held_i, held_n;
+static uint64_t held_t;
+
+static void held_sample(uint64_t now, int bn, float gs, float cs)
+{
+    if (held_t && now - held_t < 250) return;
+    held_t = now;
+    dom *x = bn == 2 ? &dg : bn == 1 ? &dc : NULL;
+    float busy = bn == 2 ? gs : cs;
+    int v = -1, mhz;
+    if (x && x->d && x->d->cur && x->applied > 0 && x->d->cur(x->d, &mhz) == 0 && mhz > 0)
+        v = busy >= 0.88f && mhz * 100 < x->applied * 90;
+    held_ring[held_i] = (int8_t)v;
+    held_i = (held_i + 1) % 8;
+    if (held_n < 8) held_n++;
+}
+
 static int pw_limited(uint64_t now)
 {
     int sum = 0, n = 0;
@@ -431,7 +452,14 @@ static int pw_limited(uint64_t now)
         sum += s->lim;
         n++;
     }
-    return n >= 4 && sum / n >= 50;
+    if (n >= 4 && sum / n >= 50) return 1;
+    int h = 0, k = 0;
+    for (int j = 0; j < held_n; j++) {
+        if (held_ring[j] < 0) continue;
+        h += held_ring[j];
+        k++;
+    }
+    return held_t && now - held_t < 1000 && k >= 4 && h * 2 > k;
 }
 
 /* which readings came in over the last two seconds */
@@ -1242,6 +1270,7 @@ static DWORD WINAPI worker(LPVOID p)
         if (gs > 1.0f) gs = 1.0f;
         if (cs_ > 1.0f) cs_ = 1.0f;
         bn = gs >= 0.88f && gs >= cs_ ? 2 : cs_ >= 0.88f ? 1 : 0;
+        held_sample(now, bn, gs, cs_);
 
         float eff = cap_target > 0.0f ? cap_target : (float)target;
         int shifting = sh.kind != SH_NONE;
@@ -1422,6 +1451,8 @@ static int start_locked(void)
 
     kn_setup();
     sh_reset();
+    held_i = held_n = 0;
+    held_t = 0;
     memset(&tr, 0, sizeof tr);
     lower_dom = NULL;
     rr = 0;
