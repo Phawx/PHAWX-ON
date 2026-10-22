@@ -26,6 +26,7 @@ static wchar_t *bat_path[MAX_BAT];
 static int nbat, bat_cache = -1;
 static uint64_t next_scan, bat_t;
 static int (*volatile readers[PWR_KINDS])(int *mw);
+static int (*volatile limit_reader)(int *pct);
 
 static BOOL CALLBACK init_once(PINIT_ONCE o, PVOID p, PVOID *c)
 {
@@ -44,6 +45,23 @@ void ph_set_power_reader(int kind, int (*fn)(int *mw))
     if (kind < 0 || kind >= PWR_KINDS) return;
     if (!fn) InterlockedExchangePointer((void *volatile *)&readers[kind], NULL);
     else InterlockedCompareExchangePointer((void *volatile *)&readers[kind], (void *)fn, NULL);
+}
+
+void ph_set_limit_reader(int (*fn)(int *pct))
+{
+    if (!fn) InterlockedExchangePointer((void *volatile *)&limit_reader, NULL);
+    else InterlockedCompareExchangePointer((void *volatile *)&limit_reader, (void *)fn, NULL);
+}
+
+int ph_power_limited(int *pct)
+{
+    InitOnceExecuteOnce(&once, init_once, NULL, NULL);
+    EnterCriticalSection(&rlk);
+    int (*f)(int *) = limit_reader, v = -1;
+    int r = f && f(&v) == 0 && v >= 0 ? 0 : -1;
+    LeaveCriticalSection(&rlk);
+    if (!r) *pct = v > 100 ? 100 : v;
+    return r;
 }
 
 static HANDLE open_bat(const wchar_t *path)

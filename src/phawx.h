@@ -266,6 +266,7 @@ typedef struct ph_auto_state {
     int   epp;            /* EPP AutoTDP set, -1 = Windows' own */
     int   cores_c[2];     /* cores it lets Windows use per kind (0 = E or all, 1 = P); -1 = not managed */
     int   trial;          /* what it is trying now, 0 = nothing (autotdp.c) */
+    int   limited;        /* held back by a package power limit (CPU and GPU share it) */
 } ph_auto_state;
 extern ph_auto_cfg g_auto;
 int  autotdp_start(void);
@@ -396,6 +397,11 @@ void ph_set_power_reader(int kind, int (*fn)(int *mw));   /* the first one per k
 int  ph_power_read(ph_power *p);                /* 0 if anything was read */
 int  ph_battery_mw(void);                       /* the battery's discharge rate alone, -1 on AC */
 int  ph_power_total(const ph_power *p, int *src);   /* battery, else package + GPU; -1 */
+/* how much of the time since the last call a power limit held the package back, in %
+   (Intel: MSR_PKG_PERF_STATUS). CPU and GPU then share a full budget, and what one
+   of them draws the other cannot have. */
+void ph_set_limit_reader(int (*fn)(int *pct));    /* the first one; NULL removes it */
+int  ph_power_limited(int *pct);                  /* 0 if known */
 
 /* ---------- fan curves (fans.c) ---------- */
 /* A fan whose owner (the GPD backend, the plugin host) offers a "Curve" mode. The
