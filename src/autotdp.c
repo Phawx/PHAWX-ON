@@ -16,6 +16,12 @@
    if the machine then draws clearly less at the same frame rate. Only one thing is
    tried at a time, so each change is measured on its own.
 
+   Held at a power limit (a handheld at a low TDP), CPU and GPU share one budget and
+   the target is often out of reach: there, what the part that is not the limit draws
+   is taken from the one that is. AutoTDP then lowers that part's clock cap, raises EPP
+   or parks cores while the GPU is the limit (a lower GPU cap or EPP back down while the
+   CPU is), and keeps each step only if the frame rate rises.
+
    Without a game the caps come off and core parking and a tuned EPP go back to
    Windows' own settings; everything does when AutoTDP stops, and after a crash. */
 
@@ -59,6 +65,7 @@ typedef struct {
     int      touched;
     int      bad, bad_n;
     uint64_t bad_t;
+    int      shift;                 /* a ceiling lowered to give the other part the budget, 0 = none */
 } dom;
 
 static HANDLE thr, stop_ev;
@@ -134,6 +141,7 @@ static void dom_limits(dom *x, int floor_cfg, int ceil_cfg)
     int lo = d->min_mhz > 0 ? d->min_mhz : 100, hi = d->max_mhz;
     x->step = d->step_mhz > 0 ? d->step_mhz : 50;
     x->ceil = ceil_cfg > 0 ? PH_CLAMP(ceil_cfg, lo, hi) : hi;
+    if (x->shift > 0 && x->shift < x->ceil) x->ceil = IMAX(x->shift, lo);
     int af = lo + (hi - lo) / 4;
     x->floor = floor_cfg > 0 ? floor_cfg : af;
     x->floor = PH_CLAMP(x->floor, lo, x->ceil);
@@ -316,23 +324,24 @@ static int act_max(int c)
 
 #define PW_N 192                    /* 250 ms apart: 48 s */
 
-typedef struct { uint64_t t; int sys, parts; } pw_s;
+typedef struct { uint64_t t; int sys, parts, lim; float fps; } pw_s;
 typedef struct { int mean, sd, n; } pstat;
 
 static pw_s pw[PW_N];
 static int pw_i, pw_n, sys_prev = -1, sys_upd;
 static uint64_t pw_t, sys_t;
 
-static void pw_sample(uint64_t now)
+static void pw_sample(uint64_t now, float fps)
 {
     if (pw_t && now - pw_t < 250) return;
     pw_t = now;
     ph_power p;
-    int sys = -1, parts = -1;
+    int sys = -1, parts = -1, lim = -1;
     if (ph_power_read(&p) == 0) {
         sys = p.sys_mw;
         parts = p.parts_mw;
     }
+    if (ph_power_limited(&lim)) lim = -1;
     /* how often the battery's reading changes sets how long a trial waits for it */
     if (sys < 0) sys_t = 0;
     else if (sys != sys_prev) {
@@ -343,7 +352,7 @@ static void pw_sample(uint64_t now)
         sys_t = now;
     }
     sys_prev = sys;
-    pw[pw_i] = (pw_s){ now, sys, parts };
+    pw[pw_i] = (pw_s){ now, sys, parts, lim, fps };
     pw_i = (pw_i + 1) % PW_N;
     if (pw_n < PW_N) pw_n++;
 }
@@ -395,6 +404,34 @@ static int pw_cmp(const pstat *b, const pstat *t)
     thr = IMAX(thr, 2 * se);
     int d = t->mean - b->mean;
     return d < -thr ? -1 : d > thr ? 1 : 0;
+}
+
+/* the frame rate over [a, b], -1 with too few samples */
+static float fps_mean(uint64_t a, uint64_t b)
+{
+    double sum = 0.0;
+    int n = 0;
+    for (int j = 0; j < pw_n; j++) {
+        const pw_s *s = &pw[(pw_i - pw_n + j + PW_N) % PW_N];
+        if (s->t < a || s->t > b || s->fps <= 0.0f) continue;
+        sum += s->fps;
+        n++;
+    }
+    return n >= 4 ? (float)(sum / n) : -1.0f;
+}
+
+/* held back by a power limit most of the last two seconds (Intel: MSR_PKG_PERF_STATUS) */
+static int pw_limited(uint64_t now)
+{
+    int sum = 0, n = 0;
+    for (int j = 0; j < pw_n && j < 8; j++) {
+        const pw_s *s = &pw[(pw_i - 1 - j + PW_N) % PW_N];
+        if (now - s->t > 2000) break;
+        if (s->lim < 0) continue;
+        sum += s->lim;
+        n++;
+    }
+    return n >= 4 && sum / n >= 50;
 }
 
 /* which readings came in over the last two seconds */
@@ -851,6 +888,205 @@ static void kn_back(int all, uint64_t now)
     }
 }
 
+/* ---------- sharing a power limit ---------- */
+
+/* Under a package power limit the target out of reach: one step that takes power from
+   the part that is not the limit, kept only if the frame rate then rises. */
+enum { SH_NONE, SH_CPU, SH_GPU, SH_EPP, SH_CORE0, SH_CORE1, SH_N };
+
+/* A step's gain is often smaller than the scene's own drift over a few seconds, so it
+   is measured the way a person would: on, off, on, off..., the frame rate of each half
+   compared with its neighbours, so that a slow drift falls out of the comparison. */
+#define SH_SEG_MS     2500         /* one half of a pair */
+#define SH_SKIP_MS    1000         /* of it, left out while the clocks and the average settle */
+#define SH_PAIRS      4
+#define SH_GAIN       1.01f        /* the frame rate must rise this much to keep a step */
+
+static struct {
+    int      kind, dir;
+    int      from, to, shift0;     /* shift0: the domain's shifted ceiling before */
+    int      seg;                  /* segments done; even ones run `to` */
+    uint64_t t;                    /* start of this segment */
+    double   sum_to, sum_from;
+    int      n_to, n_from;
+    float    before, low1;
+    int      act0;                 /* cores of the class Windows had unparked before, -1 unknown */
+} sh;
+static int sh_miss[SH_N];
+static uint64_t sh_next[SH_N];
+static int sh_rr, sh_kept, sh_gmiss;  /* sh_gmiss: steps in a row, of any kind, that gained nothing */
+static uint64_t sh_gnext;          /* sh_kept: a step under the limit was kept */
+
+static const char *sh_name(int k)
+{
+    switch (k) {
+    case SH_CPU: return "CPU clock";
+    case SH_GPU: return "GPU clock";
+    case SH_EPP: return "EPP";
+    case SH_CORE0: return g_plat.hybrid ? "E-cores" : "cores";
+    case SH_CORE1: return "P-cores";
+    }
+    return "";
+}
+
+/* a new scene (the frame rate at full speed moved): every step may pay again */
+static void sh_rearm(void)
+{
+    memset(sh_miss, 0, sizeof sh_miss);
+    memset(sh_next, 0, sizeof sh_next);
+    sh_gmiss = 0;
+    sh_gnext = 0;
+}
+
+static void sh_reset(void)
+{
+    memset(&sh, 0, sizeof sh);
+    memset(sh_miss, 0, sizeof sh_miss);
+    memset(sh_next, 0, sizeof sh_next);
+    sh_kept = sh_gmiss = 0;
+    sh_gnext = 0;
+    dc.shift = dg.shift = 0;
+}
+
+/* the step for `kind` in direction dir (-1 less power for it), -1 if none is left */
+static int sh_target(int kind, int dir)
+{
+    dom *x = kind == SH_CPU ? &dc : kind == SH_GPU ? &dg : NULL;
+    if (x) {
+        if (!x->d || x->cur <= x->floor) return -1;
+        /* a fifth first; after a step that gained nothing, half that */
+        int n = dom_q(x, x->cur - IMAX(x->step, x->cur / (sh_miss[kind] ? 10 : 5)));
+        return n < x->cur ? n : -1;
+    }
+    knob *k = &kn[kind == SH_EPP ? KN_EPP : kind == SH_CORE0 ? KN_CORE0 : KN_CORE1];
+    if (!k->on) return -1;
+    if (kind == SH_EPP) {
+        int v = k->cur + dir * EPP_STEP;
+        return v >= k->home && v <= EPP_MAX && v != k->cur ? v : -1;
+    }
+    int v = k->cur - 1;
+    if (v < k->limit || kn[KN_CORE0].cur + kn[KN_CORE1].cur - 1 < 2) return -1;
+    return v;
+}
+
+static void sh_set(int kind, int v)
+{
+    dom *x = kind == SH_CPU ? &dc : kind == SH_GPU ? &dg : NULL;
+    if (x) { x->shift = v; x->cur = v > 0 ? v : x->ceil; return; }
+    kn[kind == SH_EPP ? KN_EPP : kind == SH_CORE0 ? KN_CORE0 : KN_CORE1].cur = v;
+}
+
+/* bn: 2 the GPU is the limit, 1 the CPU */
+static int sh_begin(uint64_t now, int bn, float low1)
+{
+    static const int gpu_lim[] = { SH_CPU, SH_EPP, SH_CORE0, SH_CORE1 }, cpu_lim[] = { SH_GPU, SH_EPP, SH_CORE0, SH_CORE1 };
+    const int *c = bn == 2 ? gpu_lim : cpu_lim;
+    int n = bn == 2 ? (int)PH_ARRAY(gpu_lim) : (int)PH_ARRAY(cpu_lim), dir = bn == 2 ? 1 : -1;
+    if (now < sh_gnext) return 0;
+    float before = fps_mean(now - SH_SEG_MS, now);
+    if (before <= 0.0f) return 0;
+    for (int j = 0; j < n; j++) {
+        int kind = c[(sh_rr + j) % n];
+        if (now < sh_next[kind]) continue;
+        int to = sh_target(kind, dir);
+        if (to < 0) continue;
+        dom *x = kind == SH_CPU ? &dc : kind == SH_GPU ? &dg : NULL;
+        sh.kind = kind;
+        sh.dir = dir;
+        sh.from = x ? x->cur : kn[kind == SH_EPP ? KN_EPP : kind == SH_CORE0 ? KN_CORE0 : KN_CORE1].cur;
+        sh.shift0 = x ? x->shift : 0;
+        sh.to = to;
+        sh.t = now;
+        sh.seg = 0;
+        sh.sum_to = sh.sum_from = 0.0;
+        sh.n_to = sh.n_from = 0;
+        sh.before = before;
+        sh.low1 = low1;
+        sh.act0 = kind == SH_CORE0 || kind == SH_CORE1 ? act_max(kind - SH_CORE0) : -1;
+        sh_set(kind, to);
+        sh_rr = j + 1;
+        return 1;
+    }
+    return 0;
+}
+
+static void sh_end(int keep, uint64_t now, float after)
+{
+    int k = sh.kind;
+    if (keep) {
+        sh_set(k, sh.to);
+        sh_miss[k] = 0;
+        sh_next[k] = 0;
+        sh_kept = 1;
+        sh_gmiss = 0;
+        sh_gnext = 0;
+    } else {
+        dom *x = k == SH_CPU ? &dc : k == SH_GPU ? &dg : NULL;
+        if (x) { x->shift = sh.shift0; x->cur = sh.from; }
+        else sh_set(k, sh.from);
+        /* three in a row with nothing to gain: not again in this scene */
+        sh_miss[k]++;
+        /* and the longer the search finds nothing, the less often it looks */
+        sh_gmiss++;
+        sh_gnext = now + ((uint64_t)15000 << PH_CLAMP(sh_gmiss - 1, 0, 4));
+        sh_next[k] = sh_miss[k] >= 3 ? UINT64_MAX : now + ((uint64_t)MISS_HOLD_MS << PH_CLAMP(sh_miss[k] - 1, 0, 3));
+    }
+    ph_log("autotdp: power limit: %s %d -> %d %s (%.1f -> %.1f FPS)", sh_name(k), sh.from, sh.to,
+           keep ? "kept" : "no gain", (double)sh.before, (double)after);
+    sh.kind = SH_NONE;
+}
+
+/* 1 kept (*after = the new frame rate), -1 given up, 0 still measuring */
+static int sh_step(uint64_t now, float ff, float low1, float *after)
+{
+    int on = !(sh.seg & 1);
+    if (on && ff > 0.0f && ff < sh.before * 0.85f) { sh_end(0, now, ff); return -1; }   /* clearly worse: at once */
+    if (now - sh.t < SH_SEG_MS) return 0;
+    float m = fps_mean(sh.t + SH_SKIP_MS, now);
+    if (m > 0.0f) {
+        if (on) { sh.sum_to += m; sh.n_to++; }
+        else { sh.sum_from += m; sh.n_from++; }
+    }
+    if (sh.seg == 0 && sh.act0 >= 0) {
+        /* fewer cores allowed: did Windows park one? (as tr_step checks it) */
+        int c = sh.kind - SH_CORE0, a = act_t >= sh.t + CHECK_MS / 2 ? act[c] : -1;
+        knob *k = &kn[c];
+        if (a >= 0 && a >= sh.act0) {
+            if (!park_up && a == sh.to + 1 && sh.to * 100 % k->n) {
+                park_up = 1;
+                wp_park_rounds_up();
+                ph_log("autotdp: Windows rounds core parking up");
+                sh.t = now;
+                sh.sum_to = 0.0;
+                sh.n_to = 0;
+                return 0;
+            }
+            sh_end(0, now, m);      /* the limit did not bind: nothing to measure */
+            *after = m;
+            return -1;
+        }
+    }
+    sh.seg++;
+    sh.t = now;
+    if (sh.seg < 2 * SH_PAIRS) {
+        dom *x = sh.kind == SH_CPU ? &dc : sh.kind == SH_GPU ? &dg : NULL;
+        if (sh.seg & 1) {
+            if (x) { x->shift = sh.shift0; x->cur = sh.from; }
+            else sh_set(sh.kind, sh.from);
+        } else {
+            sh_set(sh.kind, sh.to);
+        }
+        return 0;
+    }
+    float a_to = sh.n_to ? (float)(sh.sum_to / sh.n_to) : -1.0f, a_from = sh.n_from ? (float)(sh.sum_from / sh.n_from) : -1.0f;
+    int held = !(sh.low1 > 0.0f && low1 > 0.0f && low1 < sh.low1 * 0.88f);
+    int keep = a_to > 0.0f && a_from > 0.0f && a_to >= a_from * SH_GAIN && held;
+    sh.before = a_from;
+    sh_end(keep, now, a_to);
+    *after = a_to;
+    return keep ? 1 : -1;
+}
+
 /* ---------- worker ---------- */
 
 static void publish(uint64_t now, int target, float fps, int cmax, float gs, int bn)
@@ -872,7 +1108,10 @@ static void publish(uint64_t now, int target, float fps, int cmax, float gs, int
     st.cores_on = act[0] >= 0 ? act[0] + act[1] : -1;
     for (int i = 0; i < 2; i++) st.cores_c[i] = kn[i].on ? kn[i].cur : -1;
     st.epp = kn[KN_EPP].applied;
-    st.trial = tr.kind;
+    /* a step under the power limit shows as the same kind of trial */
+    static const int sh_tk[SH_N] = { TK_NONE, TK_CPU, TK_GPU, TK_EPP, TK_CORE0, TK_CORE1 };
+    st.trial = tr.kind ? tr.kind : sh_tk[sh.kind];
+    st.limited = fps > 0.0f && pw_limited(now);
     UL();
 }
 
@@ -927,7 +1166,7 @@ static DWORD WINAPI worker(LPVOID p)
             cap_target = 0.0f;
             last_cap = 0.0f;
             probe_ms = CAP_PROBE_MS;
-            if (last_target) { tr_cancel(); kn_reset(); }
+            if (last_target) { tr_cancel(); kn_reset(); sh_reset(); }
             last_target = target;
         }
 
@@ -940,6 +1179,7 @@ static DWORD WINAPI worker(LPVOID p)
             dc.bad = dg.bad = dc.bad_n = dg.bad_n = 0;
             tr_cancel();
             kn_reset();
+            sh_reset();
         }
         if (ok && f.frames != last_frames) { last_frames = f.frames; last_frame_t = now; }
         int game = ok && f.fps > 1.0f && last_frame_t && now - last_frame_t < 1500;
@@ -951,6 +1191,7 @@ static DWORD WINAPI worker(LPVOID p)
                 ff = 0.0f;
                 cap_target = 0.0f;
                 tr_cancel();
+                if (sh.kind) sh_end(0, now, 0.0f);
                 for (int i = 0; i < KN_N; i++) kn[i].resume = kn[i].cur;
             }
             if (dc.d) dc.cur = dc.ceil;
@@ -974,7 +1215,7 @@ static DWORD WINAPI worker(LPVOID p)
         }
         wait = 50;
         /* only with a game: every reading wakes the SMU, the GPU or the EC */
-        pw_sample(now);
+        pw_sample(now, f.fps);
 
         float fast = f.fps_fast > 0.0f ? f.fps_fast : f.fps;
         ff = ff > 0.0f ? ff * 0.5f + fast * 0.5f : fast;
@@ -1003,7 +1244,21 @@ static DWORD WINAPI worker(LPVOID p)
         bn = gs >= 0.88f && gs >= cs_ ? 2 : cs_ >= 0.88f ? 1 : 0;
 
         float eff = cap_target > 0.0f ? cap_target : (float)target;
-        if (cap_target > 0.0f && ff > cap_target * 1.10f) {
+        int shifting = sh.kind != SH_NONE;
+        if (shifting) {
+            /* a step under the power limit: judged by the frame rate alone */
+            float after = 0.0f;
+            int r = sh_step(now, ff, f.low1, &after);
+            if (r == 1 && cap_target > 0.0f) {
+                cap_target = IMIN(after * 0.98f, (float)target);
+                last_cap = cap_target;
+                cap_t = now;
+                probe_ms = CAP_PROBE_MS;
+                eff = cap_target;
+            }
+            if (r) { stable_since = now; last_raise = now; }
+        }
+        if (!shifting && cap_target > 0.0f && ff > cap_target * 1.10f) {
             cap_target = 0.0f;
             last_cap = 0.0f;
             probe_ms = CAP_PROBE_MS;
@@ -1015,14 +1270,15 @@ static DWORD WINAPI worker(LPVOID p)
         float big = 0.30f - 0.04f * (float)ra;
 
         /* the frame rate climbs back from nothing when frames start again: not a shortfall */
-        int below = ff < thr_lo && now - game_t >= 2000;
+        int below = !shifting && ff < thr_lo && now - game_t >= 2000;
         if (below) { below_n++; if (!below_since) below_since = now; }
         else { below_n = 0; below_since = 0; }
         float d = below ? (eff - ff) / eff : 0.0f;
 
         int clk_ceil = (!dc.d || dc.cur >= dc.ceil) && (!dg.d || dg.cur >= dg.ceil);
         /* the target is out of reach only with everything at full speed */
-        int at_ceil = clk_ceil && kn_home();
+        /* fewer cores or a higher EPP kept under a power limit count as full speed there */
+        int at_ceil = clk_ceil && (kn_home() || (sh_kept && pw_limited(now)));
         if (below && at_ceil) { top_sum += ff; top_n++; }
         else { top_sum = 0.0; top_n = 0; }
         if (below && at_ceil && cap_target <= 0.0f && below_since && now - below_since > 4000 && f.fps > 5.0f && top_n) {
@@ -1034,6 +1290,7 @@ static DWORD WINAPI worker(LPVOID p)
                 probe_ms = probe_ms * 2 > CAP_PROBE_MAX ? CAP_PROBE_MAX : probe_ms * 2;
             else
                 probe_ms = CAP_PROBE_MS;
+            if (last_cap > 0.0f && (cap_target > last_cap * 1.10f || cap_target < last_cap * 0.90f)) sh_rearm();
             last_cap = cap_target;
             cap_t = now;
             below_n = 0;
@@ -1071,7 +1328,15 @@ static DWORD WINAPI worker(LPVOID p)
                 handled = 1;
             }
             lower_dom = NULL;
-            if (!handled && tr.kind == TK_NONE && !kn_home() && (bn != 2 || clk_ceil)) kn_back(d >= big || clk_ceil, now);
+            /* under a power limit, fewer cores and a lazier CPU were kept because they
+               gave the GPU frames: falling short there is the scene, not them */
+            if (!handled && tr.kind == TK_NONE && !kn_home() && (bn != 2 || clk_ceil) && !(sh_kept && pw_limited(now)))
+                kn_back(d >= big || clk_ceil, now);
+            if (!handled) {
+                /* the limit moved onto the part whose clock was lowered for the other one */
+                dom *bp = bn == 2 ? &dg : bn == 1 ? &dc : NULL;
+                if (bp && bp->shift && bp->cur >= bp->ceil) { bp->shift = 0; sh_next[bp == &dc ? SH_CPU : SH_GPU] = now + MISS_HOLD_MS; }
+            }
             if (!handled) {
                 float fac = 1.0f + d * 0.6f * (float)ra;
                 int ms = (ra + 1) / 2;
@@ -1100,8 +1365,15 @@ static DWORD WINAPI worker(LPVOID p)
             int stable = f.fps >= thr_lo;
             if (!stable) stable_since = now;
             int lw = IMAX(1800 - 250 * g_auto.lower_aggr, 500);
-            if (tr.kind != TK_NONE) tr_step(now, f.low1);
-            else if (stable && now - stable_since >= (uint64_t)g_auto.settle_ms && now - last_lower >= (uint64_t)lw)
+            /* held at a power limit with the target out of reach, the power cannot go down:
+               what the other part draws goes to the one that is the limit instead */
+            int share = !shifting && cap_target > 0.0f && bn && pw_limited(now);
+            if (shifting) ;
+            else if (tr.kind != TK_NONE) tr_step(now, f.low1);
+            else if (share) {
+                if (!lower_dom && stable && now - stable_since >= (uint64_t)g_auto.settle_ms && now - last_change >= SH_SEG_MS)
+                    sh_begin(now, bn, f.low1);
+            } else if (stable && now - stable_since >= (uint64_t)g_auto.settle_ms && now - last_lower >= (uint64_t)lw)
                 search(now, &f, eff, cs_, gs, cmax, bn);
         }
         if (lower_dom && now - lower_t >= FAIL_MS) lower_dom = NULL;
@@ -1149,6 +1421,7 @@ static int start_locked(void)
     ResetEvent(stop_ev);
 
     kn_setup();
+    sh_reset();
     memset(&tr, 0, sizeof tr);
     lower_dom = NULL;
     rr = 0;
@@ -1463,6 +1736,7 @@ static void fmt_power(const ph_ctl *c, int32_t v, wchar_t *b, int n)
         ph_swprintf(t, PH_ARRAY(t), L"EPP %d", s.epp);
         cat(b, n, t);
     }
+    if (s.fps > 0.0f && s.limited) cat(b, n, L"at the power limit");
     if (s.fps > 0.0f && s.trial > 0 && s.trial < PH_ARRAY(what)) {
         ph_swprintf(t, PH_ARRAY(t), L"trying %s", s.trial == TK_CORE0 && g_plat.hybrid ? L"E-cores" : what[s.trial]);
         cat(b, n, t);

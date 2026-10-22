@@ -47,7 +47,7 @@ ph_platform g_plat;
 HWND g_main;
 const GUID GUID_SUB_PROCESSOR_ = { 0x54533251, 0x82be, 0x4824, { 0x96, 0xc1, 0x47, 0xb6, 0x0b, 0x74, 0x0d, 0x00 } };
 
-static int verbose, seed;
+static int verbose, seed, seeds_verbose;
 
 void ph_log(const char *fmt, ...)
 {
@@ -192,6 +192,7 @@ typedef struct {
     int   crash;                /* end with the crash handler's release instead of a stop */
     int   user_pmax;            /* the user's own "P-core max unparked" %, 0 = Windows' 100 */
     int   pause_s;              /* no frames for 5 s from this second (alt-tab), 0 = never */
+    float pl_w;                 /* a package power limit CPU and GPU share (W), 0 = none */
 } scen;
 
 static const scen *S;
@@ -202,7 +203,7 @@ static uint32_t frames;
 static int bat_val = -1, game_on;
 static uint64_t bat_t, rng = 88172645463325252ull;
 static uint64_t stat_t0;
-static double stat_p, stat_n, stat_short, stat_all;
+static double stat_p, stat_n, stat_short, stat_all, stat_f;
 static int min_p = 99, min_e = 99, min_total = 99;
 static int churn, last_np, last_ne, last_epp, max_p;
 static int pause_restored = -1, pre_cores = -1, post_cores = -1, pre_trial;
@@ -238,7 +239,7 @@ static double core_w(int p, double fg, double v, double b)
     return p ? 0.97 * fg * v * v * b + 0.5 * b + 0.15 * (1 - b) : 0.30 * fg * v * v * b + 0.15 * b + 0.05 * (1 - b);
 }
 
-static void eval(int ccap, int gcap, int np, int ne, int epp, double wc, double wg, pv *o)
+static void eval_at(double ccap, double gcap, int np, int ne, int epp, double wc, double wg, pv *o)
 {
     const double sp = 1.0, se = NE ? 0.6 : 1.0;
     int main_p = np > 0;
@@ -275,6 +276,26 @@ static void eval(int ccap, int gcap, int np, int ne, int epp, double wc, double 
     o->p_gpu = 5.9 * gcap / 1000.0 * vg * vg * gb + 0.3 + 0.9 * gb;
     o->p_cpu = pc;
     o->p_sys = (pc + o->p_gpu) * 1.1 + 3.5;
+}
+
+/* With a package power limit the SoC takes both clocks down together until CPU and
+   GPU fit in it, as Intel's PCU does under PL1; a CPU that wastes power then leaves the
+   GPU less of the budget. */
+static double pl_k;                 /* how far the limit held the clocks down last time, 1 = not at all */
+
+static void eval(int ccap, int gcap, int np, int ne, int epp, double wc, double wg, pv *o)
+{
+    eval_at(ccap, gcap, np, ne, epp, wc, wg, o);
+    pl_k = 1.0;
+    if (!S || S->pl_w <= 0 || o->p_cpu + o->p_gpu <= S->pl_w) return;
+    double lo = 0.2, hi = 1.0;
+    for (int i = 0; i < 24; i++) {
+        double k = (lo + hi) / 2;
+        eval_at(ccap * k, gcap * k, np, ne, epp, wc, wg, o);
+        if (o->p_cpu + o->p_gpu > S->pl_w) hi = k; else lo = k;
+    }
+    eval_at(ccap * lo, gcap * lo, np, ne, epp, wc, wg, o);
+    pl_k = lo;
 }
 
 static int cur_np(void) { return NE ? allowed(1, NP) : allowed(0, NP); }
@@ -317,7 +338,7 @@ static void plant(double dt)
         stat_all += dt;
         if (o->fps < S->target * 0.95) stat_short += dt;
     }
-    if (T >= stat_t0 && game_on) { stat_p += o->p_sys * dt; stat_n += dt; }
+    if (T >= stat_t0 && game_on) { stat_p += o->p_sys * dt; stat_f += o->fps * dt; stat_n += dt; }
     int total = np + ne;
     if (S->pause_s) {
         /* just before the pause, near its end (everything back to Windows'), and a
@@ -381,6 +402,14 @@ int ph_power_read(ph_power *p)
     p->gpu_mw = -1;
     p->parts_mw = p->pkg_mw;
     return p->sys_mw >= 0 || p->parts_mw >= 0 ? 0 : -1;
+}
+
+/* the package held back by its power limit, as Intel's MSR_PKG_PERF_STATUS shows it */
+int ph_power_limited(int *pct)
+{
+    if (!game_on || !S->pl_w) return -1;
+    *pct = pl_k < 0.995 ? 100 : 0;
+    return 0;
 }
 
 /* the CPU's time per logical CPU, as NtQuerySystemInformation(8) gives it */
@@ -469,6 +498,34 @@ static best oracle(void)
     return b;
 }
 
+/* under a package power limit: the most frames any setting gets out of it */
+static best oracle_fps(double *fps)
+{
+    best b = { 0, 0, 0, 0, 0, 0 };
+    double top = 0;
+    int pmin = 2, emin = NE ? 1 : 0;
+    for (int c = 1500; c <= 4800; c += 100)
+        for (int g = 750; g <= 2000; g += 50)
+            for (int np = pmin; np <= NP; np++)
+                for (int ne = emin; ne <= NE; ne++)
+                    for (int e = 0; e <= 60; e += 20) {
+                        pv o;
+                        eval(c, g, np, ne, e, 1.0, 1.0, &o);
+                        if (o.fps <= top * 1.001) continue;
+                        top = o.fps;
+                        b = (best){ o.p_sys, c, g, np, ne, e };
+                    }
+    *fps = top;
+    return b;
+}
+
+static double stock_fps(void)
+{
+    pv o;
+    eval(4800, 2000, NP, NE, 33, 1.0, 1.0, &o);
+    return o.fps;
+}
+
 /* the same scene with every limit off: what the machine draws without AutoTDP */
 static double stock(void)
 {
@@ -493,6 +550,9 @@ static const scen scens[] = {
     { "crash while running, 8 cores", 0, 6, 12, 18, 4, 60, 60, 2000, 1, 1, 0, 1, 0, 200, 1, 1 },
     { "user limits P-cores to 50%, hybrid", 1, 6, 12, 18, 4, 60, 60, 2000, 1, 1, 0, 1, 0, 500, 1, 0, 50 },
     { "no frames for 5 s at 400 s (alt-tab), hybrid", 1, 6, 12, 18, 4, 60, 60, 2000, 1, 1, 0, 1, 0, 600, 1, 0, 0, 400 },
+    /* a handheld held at a low TDP: CPU and GPU share 15 W and the target is out of reach */
+    { "GPU-bound under a 15 W package limit, hybrid", 1, 8, 16, 40, 4, 0, 60, 2000, 1, 1, 0, 1, 0, 900, 0, 0, 0, 0, 15.0f },
+    { "CPU-bound under a 15 W package limit, target 120, hybrid", 1, 40, 30, 12, 4, 0, 120, 2000, 1, 1, 0, 1, 0, 900, 0, 0, 0, 0, 15.0f },
 };
 
 static void machine(int hybrid)
@@ -545,7 +605,7 @@ static int run(int idx, int cores, int epp_mode, double *power, int mode)
     T0 = bat_t = T;
     T_end = T0 + (uint64_t)s->dur_s * 1000;
     stat_t0 = T0 + (uint64_t)(s->quit_s ? s->quit_s - 60 : s->dur_s - 60) * 1000;
-    stat_p = stat_n = stat_short = stat_all = 0;
+    stat_p = stat_n = stat_short = stat_all = stat_f = 0;
     min_p = min_e = min_total = 99;
     max_p = 0;
     pause_restored = pre_cores = post_cores = -1;
@@ -605,6 +665,14 @@ static int run(int idx, int cores, int epp_mode, double *power, int mode)
     if (mode == RUN_BASE) return ok;
 
     best b = oracle();
+    double fps_end = stat_n > 0 ? stat_f / stat_n : 0, fps_top = 0;
+    best bf = { 0 };
+    if (s->pl_w > 0) bf = oracle_fps(&fps_top);
+    /* under the limit with the target out of reach: no fewer frames than without
+       AutoTDP (the last minute's average itself wanders about 1%), and most of what
+       the limit allows */
+    int f_pl = s->pl_w > 0 && !s->quit_s && fps_top < s->target * 0.975 &&
+               (fps_end < stock_fps() * 0.98 || fps_end < fps_top * 0.93);
     double shortf = stat_all > 0 ? stat_short / stat_all : 0;
     int floor_ok = s->hybrid ? min_p >= 2 && min_e >= 1 : min_total >= 2;
     int f_frames = s->reachable && shortf > 0.03, f_power = s->reachable && !s->quit_s && p > b.p * 1.12;
@@ -612,12 +680,14 @@ static int run(int idx, int cores, int epp_mode, double *power, int mode)
     int f_user = s->user_pmax && max_p > (s->user_pmax * NP + 99) / 100;
     /* a trial running when the frames stopped is abandoned, so only then may the cores differ */
     int f_pause = s->pause_s && (pause_restored != 1 || (post_cores != pre_cores && !pre_trial));
-    ok &= !f_frames && !f_power && floor_ok && !f_churn && !f_user && !f_pause;
+    ok &= !f_frames && !f_power && floor_ok && !f_churn && !f_user && !f_pause && !f_pl;
     if (mode == RUN_QUIET) {
-        if (f_frames || f_power || !floor_ok || f_churn || f_user || f_pause)
-            printf("    seed %d: frames short %.1f%%, power +%.1f%%, fewest cores %d, changes late %d%s%s\n", seed,
+        if (f_frames || f_power || !floor_ok || f_churn || f_user || f_pause || f_pl)
+            printf("    seed %d: frames short %.1f%%, power +%.1f%%, fewest cores %d, changes late %d%s%s%s\n", seed,
                    shortf * 100, (p / b.p - 1) * 100, min_total, churn, f_user ? ", too many P-cores" : "",
-                   f_pause ? ", pause not handled" : "");
+                   f_pause ? ", pause not handled" : "", f_pl ? ", fewer frames than the limit allows" : "");
+        if (s->pl_w > 0 && (seeds_verbose || f_pl))
+            printf("    seed %d: %.1f FPS, the limit allows %.1f, without AutoTDP %.1f\n", seed, fps_end, fps_top, stock_fps());
         return ok;
     }
     printf("  end: CPU %d GPU %d, %d P + %d E cores, EPP %d   [%ls | %ls]\n", end_c, end_g, end_np, end_ne, end_epp, st1, st2);
@@ -629,6 +699,11 @@ static int run(int idx, int cores, int epp_mode, double *power, int mode)
     }
     printf("without AutoTDP %.2f W; frames short %.1f%% of the time; fewest cores %d (%d P, %d E); changes late %d\n",
            stock(), shortf * 100, min_total, min_p, min_e, churn);
+    if (s->pl_w > 0) {
+        printf("  under the %.0f W limit: %.1f FPS, the most it allows %.1f FPS (CPU %d GPU %d, %d P + %d E, EPP %d), "
+               "without AutoTDP %.1f FPS\n", s->pl_w, fps_end, fps_top, bf.c, bf.g, bf.np, bf.ne, bf.epp, stock_fps());
+        if (f_pl) printf("    FAIL %.1f%% fewer frames than the limit allows\n", (1 - fps_end / fps_top) * 100);
+    }
     if (f_frames) printf("    FAIL frame rate held only %.1f%% of the time\n", 100 - shortf * 100);
     if (f_power) printf("    FAIL power %.1f%% above the best\n", (p / b.p - 1) * 100);
     if (!floor_ok) printf("    FAIL went below the core floor\n");
@@ -648,8 +723,10 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-v")) verbose = 1;
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) seeds = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-seed") && i + 1 < argc) seed = atoi(argv[++i]);
         else only = atoi(argv[i]);
     }
+    seeds_verbose = verbose;
     if (seeds > 1) {
         /* the same scenarios with other scenes: only the failures and the spread */
         int fails = 0;

@@ -3,6 +3,7 @@
 #define MSR_RAPL_UNIT     0x606
 #define MSR_PKG_LIMIT     0x610
 #define MSR_PKG_ENERGY    0x611
+#define MSR_PKG_PERF      0x613   /* time the package was throttled by a power limit */
 #define MSR_PKG_INFO      0x614
 #define MSR_TEMP_TARGET   0x1A2
 #define MSR_PKG_THERM     0x1B1
@@ -197,6 +198,27 @@ static int read_power(int *mw)
     return ok ? 0 : -1;
 }
 
+/* for AutoTDP: the share of the time since its previous call that a package power
+   limit (PL1/PL2, or the one the firmware sets through MMIO) held the package back */
+static int read_limited(int *pct)
+{
+    static uint32_t c0;
+    static double t0;
+    static int have;
+    uint64_t v;
+    if (drv_rdmsr(MSR_PKG_PERF, &v)) return -1;
+    uint32_t c = (uint32_t)v;
+    double now = ph_qpc_ms(), dt = now - t0;
+    int ok = 0;
+    if (have && dt >= 50.0 && dt < 5000.0) {
+        double ms = (double)(uint32_t)(c - c0) * 1000.0 / (double)(1ull << time_unit);
+        int p = (int)(ms * 100.0 / dt + 0.5);
+        if (p >= 0 && p <= 110) { *pct = p > 100 ? 100 : p; ok = 1; }
+    }
+    if (!have || dt >= 50.0) { c0 = c; t0 = now; have = 1; }
+    return ok ? 0 : -1;
+}
+
 static int get_power(ph_ctl *c, int32_t *out) { *out = pkg_mw; return pkg_mw < 0 ? -1 : 0; }
 static int get_temp(ph_ctl *c, int32_t *out) { *out = pkg_temp; return pkg_temp < 0 ? -1 : 0; }
 
@@ -278,6 +300,7 @@ static int intel_init(void)
     if (!have_temp) ctls[C_TEMP].flags |= CF_HIDDEN;
     if (drv_rdmsr(MSR_PKG_ENERGY, &t)) ctls[C_PWR].flags |= CF_HIDDEN;
     else ph_set_power_reader(PWR_PKG, read_power);
+    if (!drv_rdmsr(MSR_PKG_PERF, &t)) ph_set_limit_reader(read_limited);
 
     sample();
     ph_register_ctls(ctls, PH_ARRAY(ctls));
