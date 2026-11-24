@@ -123,6 +123,16 @@ int32_t ph_ctl_step(const ph_ctl *c, int32_t cur, int dir, int32_t lo, int32_t h
     return PH_CLAMP(v, lo, hi);
 }
 
+ph_ctl *ph_tdp_ctl(void)
+{
+    static const char *const keys[] = { "cpu.tdp", "ryzenadj.stapm" };
+    for (int i = 0; i < PH_ARRAY(keys); i++) {
+        ph_ctl *c = ph_ctl_find(keys[i]);
+        if (c && !(c->flags & CF_HIDDEN) && c->set) return c;
+    }
+    return NULL;
+}
+
 void ph_apply_all(int reapply_only)
 {
     for (int i = 0; i < nctls; i++) {

@@ -851,6 +851,27 @@ static void kn_back(int all, uint64_t now)
     }
 }
 
+/* ---------- session log: one row a second while a game runs, only when it is on ---------- */
+
+static ph_ctl *log_tdp;             /* found on the main thread at start */
+static uint64_t log_t;
+static int logging;
+
+static void log_tick(uint64_t now, const ph_fps *f)
+{
+    if (now - log_t < 1000) return;
+    log_t = now;
+    logging = 1;
+    /* st is this thread's own: publish has just filled it */
+    ph_slog_row r = {
+        .exe = f->exe, .fps = f->fps, .low1 = f->low1, .target = st.target, .cpu_mhz = st.cpu_mhz,
+        .gpu_mhz = st.gpu_mhz, .cores_on = st.cores_on, .cores_max = st.cores_max > 0 ? st.cores_max : -1,
+        .epp = st.epp, .power_mw = st.power_mw, .power_src = st.power_src,
+        .tdp_mw = log_tdp && log_tdp->active ? log_tdp->val : -1, .trying = tr_name(tr.kind), .bottleneck = st.bottleneck
+    };
+    slog_row(now, &r);
+}
+
 /* ---------- worker ---------- */
 
 static void publish(uint64_t now, int target, float fps, int cmax, float gs, int bn)
@@ -902,6 +923,7 @@ static DWORD WINAPI worker(LPVOID p)
         last_tick = now;
         sync_cfg();
         kn_sync();
+        if (logging && !g_slog) { slog_close(); logging = 0; }
 
         ph_clk *g = ph_gpu_clk();
         if (!dom_usable(g)) g = NULL;
@@ -1110,6 +1132,7 @@ static DWORD WINAPI worker(LPVOID p)
         dom_apply(&dg, force);
         kn_apply(1);
         publish(now, (int)(eff + 0.5f), f.fps, cmax, gs, bn);
+        if (g_slog) log_tick(now, &f);
     }
     return 0;
 }
@@ -1167,6 +1190,9 @@ static int start_locked(void)
     act_t = 0;
     park_up = 0;
     cpu_primed = 0;
+    log_tdp = ph_tdp_ctl();
+    log_t = 0;
+    logging = 0;
     LK();
     memset(&st, 0, sizeof st);
     st.running = 1;
@@ -1212,6 +1238,7 @@ void autotdp_stop(void)
     dom_release(&dg);
     dc.d = dg.d = NULL;
     kn_restore();
+    if (logging) { slog_close(); logging = 0; }   /* the worker has stopped: its file is ours */
     InterlockedExchange(&running, 0);
     LK();
     memset(&st, 0, sizeof st);

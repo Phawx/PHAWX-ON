@@ -128,6 +128,7 @@ ph_ctl  *ph_ctl_find(const char *key);
 int      ph_ctl_apply(ph_ctl *c, int32_t v);
 void     ph_ctl_reset(ph_ctl *c);
 int32_t  ph_ctl_step(const ph_ctl *c, int32_t cur, int dir, int32_t lo, int32_t hi);  /* one step, on the grid */
+ph_ctl  *ph_tdp_ctl(void);           /* the sustained TDP: the built-in cpu.tdp, else the RyzenAdj plugin's */
 void     ph_apply_all(int reapply_only);
 ph_clk  *ph_cpu_clk(void);
 ph_clk  *ph_gpu_clk(void);
@@ -284,6 +285,25 @@ void autotdp_register_ctls(void);
 void autotdp_cfg_loaded(void);                   /* after cfg_load: find the saved GPU domain by name */
 int  autotdp_owns(const ph_ctl *c);              /* AutoTDP holds this setting now (locked in the UI) */
 int  autotdp_live(const ph_ctl *c, int32_t *out); /* the value it holds it at: 1, 2 = trying it now; 0 = none */
+
+/* ---------- session log for testers (sessionlog.c) ---------- */
+typedef struct ph_slog_row {
+    const wchar_t *exe;
+    float fps, low1;
+    int   target, cpu_mhz, gpu_mhz;
+    int   cores_on, cores_max, epp;     /* -1 = unknown / not managed */
+    int   power_mw, power_src;          /* -1 = no reading; PSRC_* */
+    int   tdp_mw;                       /* -1 = Default */
+    const char *trying;                 /* "" = nothing */
+    int   bottleneck;                   /* 0 none, 1 CPU, 2 GPU */
+} ph_slog_row;
+extern volatile LONG g_slog;            /* "Save a session log" is on */
+void slog_row(uint64_t now, const ph_slog_row *r);  /* the AutoTDP worker, once a second with a game */
+void slog_close(void);                  /* flush and close; the worker, or after it stopped */
+int  slog_dir(wchar_t *out, int n);     /* the logs folder, created; -1 if none can be written */
+int  slog_head(char *b, int n);
+int  slog_text(char *b, int n, const ph_slog_row *r, const char *clock, unsigned secs);  /* one CSV line, 0 if it does not fit */
+void slog_name(wchar_t *b, int n, int y, int mo, int d, int h, int mi, int s, const wchar_t *exe);
 
 /* ---------- config (config.c) ---------- */
 void cfg_load(void);

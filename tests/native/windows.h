@@ -35,6 +35,15 @@ typedef BOOL (*PINIT_ONCE_FN)(PINIT_ONCE, PVOID, PVOID *);
 #define GENERIC_WRITE 0x40000000
 #define CREATE_NEW 1
 #define ERROR_FILE_EXISTS 80
+#define ERROR_ALREADY_EXISTS 183
+#define FILE_APPEND_DATA 4
+#define FILE_SHARE_READ 1
+#define OPEN_ALWAYS 4
+#define CREATE_ALWAYS 2
+#define FILE_ATTRIBUTE_NORMAL 0x80
+#define FILE_ATTRIBUTE_TEMPORARY 0x100
+#define FILE_FLAG_DELETE_ON_CLOSE 0x04000000
+typedef struct { uint16_t wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds; } SYSTEMTIME;
 
 static inline int lstrlenW(const wchar_t *s) { return s ? (int)wcslen(s) : 0; }
 static inline wchar_t *lstrcpynW(wchar_t *d, const wchar_t *s, int n)
@@ -76,6 +85,8 @@ BOOL CloseHandle(HANDLE h);
 DWORD GetLastError(void);
 DWORD GetEnvironmentVariableW(const wchar_t *n, wchar_t *b, DWORD sz);
 BOOL CreateDirectoryW(const wchar_t *p, void *sa);
+BOOL WriteFile(HANDLE h, const void *b, DWORD n, DWORD *w, void *ov);
+void GetLocalTime(SYSTEMTIME *t);
 int WideCharToMultiByte(UINT cp, DWORD fl, const wchar_t *w, int nw, char *a, int na, const char *d, BOOL *u);
 int MultiByteToWideChar(UINT cp, DWORD fl, const char *a, int na, wchar_t *w, int nw);
 DWORD GetPrivateProfileStringW(const wchar_t *sec, const wchar_t *key, const wchar_t *def, wchar_t *out, DWORD n, const wchar_t *file);

@@ -73,7 +73,7 @@ sim: $(SIM)
 # tests/native/windows.h; runs anywhere
 HOSTCC ?= gcc
 TEST = build/logic_test
-$(TEST): tests/logic_test.c tests/native/windows.h src/config.c src/registry.c src/phawx.h $(wildcard src/*.h)
+$(TEST): tests/logic_test.c tests/native/windows.h src/config.c src/registry.c src/sessionlog.c $(wildcard src/*.h)
 	@mkdir -p build
 	$(HOSTCC) -O1 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
 		-Itests/native -Isrc -o $@ $<

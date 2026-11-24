@@ -260,23 +260,11 @@ static void stepkeys_register(int on)
     }
 }
 
-/* the sustained TDP: the built-in control, else the RyzenAdj plugin's */
-static ph_ctl *step_ctl(int gpu)
-{
-    static const char *const tdp[] = { "cpu.tdp", "ryzenadj.stapm" };
-    if (gpu) return ph_ctl_find("auto.gpumax");
-    for (int i = 0; i < PH_ARRAY(tdp); i++) {
-        ph_ctl *c = ph_ctl_find(tdp[i]);
-        if (c && !(c->flags & CF_HIDDEN) && c->set) return c;
-    }
-    return NULL;
-}
-
 /* one control step, applied to the value in force, shown in a toast */
 static void step_hotkey(int id)
 {
     int gpu = id >= HK_TDP_UP + 2, dir = (id - HK_TDP_UP) % 2 ? -1 : 1;
-    ph_ctl *c = step_ctl(gpu);
+    ph_ctl *c = gpu ? ph_ctl_find("auto.gpumax") : ph_tdp_ctl();
     if (!c || (c->flags & CF_HIDDEN) || !c->set) {
         ui_toast(gpu ? L"No GPU clock control on this device" : L"No TDP control on this device");
         return;
@@ -322,6 +310,15 @@ static int sub_stepkeys(const ph_ctl *c, wchar_t *b, int n)
     }
     lstrcpynW(b, L"Ctrl+Alt+Up/Down for TDP, add Shift for the GPU clock", n);
     return TONE_DIM;
+}
+
+static int set_slog(ph_ctl *c, int32_t v) { (void)c; InterlockedExchange(&g_slog, v != 0); return 0; }
+static int act_logs(ph_ctl *c, int32_t v)
+{
+    (void)c; (void)v;
+    wchar_t d[MAX_PATH];
+    if (slog_dir(d, MAX_PATH) || ph_open_url(d)) { ui_toast(L"Could not open the logs folder"); return -1; }
+    return 0;
 }
 
 static int set_autostart(ph_ctl *c, int32_t v) { (void)c; return app_autostart_set(v) == 0 ? 0 : -1; }
@@ -386,6 +383,11 @@ static ph_ctl app_ctls[] = {
     { .key = "app.saveprof", .label = L"Save profile for current game", .type = CT_ACTION, .page = PG_SETTINGS, .set = act_save_profile, .flags = CF_NOSAVE, .order = 12 },
     { .key = "app.delprof", .label = L"Delete current game profile", .type = CT_ACTION, .page = PG_SETTINGS, .set = act_del_profile, .flags = CF_NOSAVE, .order = 13 },
     { .key = "app.resetall", .label = L"Revert everything to defaults", .type = CT_ACTION, .page = PG_SETTINGS, .set = act_reset_all, .flags = CF_NOSAVE | CF_DANGER, .order = 14 },
+    { .key = NULL, .label = L"Session log", .type = CT_HEADER, .page = PG_SETTINGS, .order = 15 },
+    { .key = "app.sessionlog", .label = L"Save a session log", .type = CT_TOGGLE, .page = PG_SETTINGS, .def = 0,
+      .set = set_slog, .order = 16 },
+    { .key = "app.openlogs", .label = L"Open logs folder", .type = CT_ACTION, .page = PG_SETTINGS, .set = act_logs,
+      .flags = CF_NOSAVE, .order = 17 },
     { .key = NULL, .label = L"About", .type = CT_HEADER, .page = PG_SETTINGS, .order = 20 },
     { .key = NULL, .label = L"Version", .type = CT_INFO, .page = PG_SETTINGS, .fmt = fmt_ver, .order = 21 },
     { .key = NULL, .label = L"CPU", .type = CT_INFO, .page = PG_SETTINGS, .fmt = fmt_cpu, .order = 22 },
