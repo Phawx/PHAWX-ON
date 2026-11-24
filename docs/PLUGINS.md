@@ -578,6 +578,15 @@ On that thread the plugin takes `Global\Access_PCI` around every call, waiting u
 
 At start the log shows the CPU family and model, libryzenadj's own family number, the slider range and whether the power table is readable.
 
+## The device plugins
+
+`plugins\rogally\rogally.dll` and `plugins\legiongo\legiongo.dll` ship with Phawx ON and are off by default. Each checks the SMBIOS maker and model at start and does nothing on any other machine ("only for ..." on the Plugins page). They bring no driver: they use the vendor's own firmware interface, which the vendor's app installs or the firmware provides. Every row starts at Default, a row is offered only when its value can be read back, and the value found at start is written back when the row goes to Default (at the next tick, while the overlay is open) and at exit. The source of each lists its exact calls.
+
+- **ROG Ally** (ROG Ally RC71L, Ally X RC72L). *Operating mode* (Silent / Performance / Turbo) and the two fan speeds, through `\\.\ATKACPI` (DSTS / DEVS on devices `0x00120075`, `0x00110013`, `0x00110014`, as G-Helper and Linux asus-wmi use them). Needs the ASUS System Control Interface driver that Armoury Crate installs. Fan curves are left out.
+- **Legion Go** (Legion Go 83E1, Go S 83L3, 83N6, 83Q2, 83Q3, or a BIOS family naming "Legion Go"). *Performance mode* (Quiet / Balanced / Performance) through WMI `LENOVO_GAMEZONE_DATA` `Get/SetSmartFanMode`, and *Fan full speed* (advanced) through `LENOVO_FAN_METHOD` `Fan_Get/Set_FullSpeed`, as Lenovo Legion Toolkit and Handheld Companion call them. WMI runs on the plugin's own thread with a 2-second limit per call; the rows show the values it last read, refreshed at most once a second while the overlay is open. Fan curves are left out.
+
+The vendor's own app (Armoury Crate, Legion Space) may set the mode again while it runs. There is no MSI Claw plugin yet: the Claw's MSI Center M interface is not documented well enough in open-source tools to write to it safely.
+
 ## Troubleshooting
 
 ### The plugin is not listed
