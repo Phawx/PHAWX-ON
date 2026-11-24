@@ -204,6 +204,7 @@ void cpuidex(uint32_t leaf, uint32_t sub, uint32_t r[4]);
 int  wp_read(const GUID *sub, const GUID *set, int dc, DWORD *v);
 int  wp_write(const GUID *sub, const GUID *set, DWORD ac, DWORD dc);
 int  wp_write_both(const GUID *sub, const GUID *set, DWORD v);
+int  wp_write_owned(const GUID *sub, const GUID *set, DWORD ac, DWORD dc, ph_ctl *owner); /* put back when owner goes to Default */
 void wp_commit(void);                 /* PowerSetActiveScheme(current) once after batch */
 int  wp_set_overlay(const GUID *ov);  /* power mode slider */
 extern const GUID GUID_SUB_PROCESSOR_, GUID_SUB_NONE_;

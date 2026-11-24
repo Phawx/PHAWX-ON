@@ -260,6 +260,7 @@ int wp_read(const GUID *sub, const GUID *set, int dc, DWORD *v)
 
 int wp_write(const GUID *sub, const GUID *set, DWORD ac, DWORD dc) { return write_ex(sub, set, ac, dc, NULL); }
 int wp_write_both(const GUID *sub, const GUID *set, DWORD v) { return write_ex(sub, set, v, v, NULL); }
+int wp_write_owned(const GUID *sub, const GUID *set, DWORD ac, DWORD dc, ph_ctl *owner) { return write_ex(sub, set, ac, dc, owner); }
 
 void wp_commit(void)
 {

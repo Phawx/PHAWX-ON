@@ -71,7 +71,7 @@ Control keys (such as `cpu.tdp`) are the names used in `phawx.ini`.
 | Intel uncore ratio (0x620) | Blocked | Not in the write allowlist. |
 | Intel race-to-halt (0x1FC) | Blocked | Not in the write allowlist. |
 | Intel iGPU GT limit (MCHBAR+0x5994) | Blocked / replaced | Intel iGPU frequency is set through IGCL instead (`src/gpu/intel.c`). |
-| Intel Graphics power plan (powercfg 44f3beca) | No | Could be added to `src/sys/winpower.c`. |
+| Intel Graphics power plan (powercfg 44f3beca) | Yes | `src/gpu/intel.c`: "Graphics power plan" (`intelgpu.powerplan`) under the Intel integrated GPU: Max battery / Balanced / Max performance, written to the active scheme for AC and DC through `wp_write_owned`, so Default and exit put the old values back. Shown only where the setting can be read. |
 | Intel DPTF device disable | Not planned | Removes a thermal safety layer. |
 | iGPU VRAM (DedicatedSegmentSize) | Not planned | Registry change that needs a driver restart. |
 | AMD `--max-performance` / `--power-saving` | Yes | `src/cpu/amd.c` (`cpu.smumode`, "Firmware power profile", advanced), `src/cpu/smu.c`. MP1 0x11 / 0x12 (Raven class 0x18 / 0x19), argument 0, Renoir and later APUs; not on Dragon or Fire Range. The firmware cannot report which one is active, so Default and exit send the one ALIB uses for the power source (AC: max performance, battery: power saving), and only if Phawx ON sent one. |
@@ -84,7 +84,8 @@ Control keys (such as `cpu.tdp`) are the names used in `phawx.ini`.
 | Power mode slider (overlay) | Yes | `src/sys/winpower.c` (`power.mode`) |
 | Min/max processor state, autonomous mode and window, duty cycling | Yes | `src/sys/winpower.c` (System page, Power section; the tuning rows are advanced) |
 | Radeon Chill, FRTC, Anti-Lag, Boost, RSR, RIS / sharpness | Yes | `src/gpu/amd.c` (`radeon.*`), plus an optional driver restart action |
-| Radeon AFMF, Vari-Bright, VSR, colour depth, UMD settings | No | Could be added to the registry table in `src/gpu/amd.c`. |
+| Radeon AFMF | Yes | `src/gpu/amd.c`: "AMD Fluid Motion Frames" (`radeon.afmf`) in Radeon settings: registry `DrvFrameGenEnabled` (REG_BINARY, 4 bytes LE 0/1) plus ADLX `IADLX3DSettingsServices1::GetAMDFluidMotionFrames` live. Shown where the driver keeps the value or ADLX says it is supported. |
+| Radeon Vari-Bright, VSR, colour depth, UMD settings | No | Could be added to the registry table in `src/gpu/amd.c`. |
 | EDID overrides, DAL restricted modes, integer scaling | Not planned | Destructive display registry edits. |
 | Refresh rate / resolution (qres) | Yes | `src/sys/display.c` (`display.refresh`, `display.res`) |
 | GPD Win Mini fan (EC 0x7A) | Yes | `src/sys/devices.c` (`dev.fanmode`, `dev.fanspeed`, curve `dev.fancurve`) through LpcACPIEC. Auto, Manual, Full speed or Curve. Picking Default hands the fan back to the firmware at once. The ITE 0x4E/0x4F path cannot work with LpcACPIEC. Only the ACPI EC fallback runs. |
