@@ -10,7 +10,7 @@ enum {
 
 enum {
     S_STAPM_LIMIT, S_FAST_LIMIT, S_SLOW_LIMIT, S_APU_SLOW_LIMIT, S_STAPM_TIME, S_SLOW_TIME,
-    S_TCTL_TEMP, S_MAX_GFXCLK, S_MIN_GFXCLK, S_COUNT
+    S_TCTL_TEMP, S_MAX_GFXCLK, S_MIN_GFXCLK, S_POWER_SAVING, S_MAX_PERF, S_COUNT
 };
 
 enum {
@@ -28,5 +28,6 @@ int      smu_pm_ok(void);
 int      smu_tctl(int *celsius);     /* Tctl from the SMN thermal register, without the PM table */
 int      smu_pm_refresh(void);
 int      smu_pm_get(int field, float *v);
+int      smu_pm_cores(float *ghz, float *celsius, int max);   /* per-core arrays of known tables: count, or -1 */
 
 #endif

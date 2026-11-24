@@ -351,6 +351,34 @@ static const char *const keys_arc[C_N] = {
     [C_PL1] = "arc.power", [C_PL2] = "arc.powerboost"
 };
 
+/* The Intel graphics driver's power plan setting (docs/research/gpu_control.md §3.3):
+   powercfg subgroup 44f3beca-a7c0-460e-9df2-bb8b99e0cba6, setting
+   3619c3f2-afb2-4afc-b0e9-e7fef372de36, 0 max battery, 1 balanced, 2 max performance.
+   Written to the active scheme for AC and DC; winpower puts the old values back
+   on Default and on exit. */
+static const GUID G_SUB_IGFX = { 0x44f3beca, 0xa7c0, 0x460e, { 0x9d, 0xf2, 0xbb, 0x8b, 0x99, 0xe0, 0xcb, 0xa6 } };
+static const GUID G_IGFX_PLAN = { 0x3619c3f2, 0xafb2, 0x4afc, { 0xb0, 0xe9, 0xe7, 0xfe, 0xf3, 0x72, 0xde, 0x36 } };
+static const wchar_t *const plan_ch[] = { L"Max battery", L"Balanced", L"Max performance", NULL };
+
+static int plan_get(ph_ctl *c, int32_t *out)
+{
+    (void)c;
+    DWORD v;
+    if (wp_read(&G_SUB_IGFX, &G_IGFX_PLAN, !g_plat.on_ac, &v) || v > 2) return -1;
+    *out = (int32_t)v;
+    return 0;
+}
+
+static int plan_set(ph_ctl *c, int32_t v)
+{
+    DWORD d = (DWORD)PH_CLAMP(v, 0, 2);
+    return wp_write_owned(&G_SUB_IGFX, &G_IGFX_PLAN, d, d, c);
+}
+
+static ph_ctl plan_ctl = { .key = "intelgpu.powerplan", .label = L"Graphics power plan", .type = CT_CHOICE,
+                           .page = PG_GPU, .flags = GF, .choices = plan_ch, .def = 1,
+                           .get = plan_get, .set = plan_set, .order = 300 + C_N };
+
 static igpu *clk_gpu(ph_clk *d) { return (igpu *)d->ctx; }
 
 static int clk_set_max(ph_clk *d, int mhz)
@@ -535,6 +563,8 @@ static void setup(igpu *g)
     if (!g->ui.sup_mw) g->ctls[C_PWR].flags |= CF_HIDDEN;
     if (g->ui.temp < 0) g->ctls[C_TEMP].flags |= CF_HIDDEN;
     ph_register_ctls(g->ctls, C_N);
+    int32_t v;
+    if (g->integrated && plan_get(&plan_ctl, &v) == 0) ph_register_ctls(&plan_ctl, 1);
 }
 
 static int ig_probe(void)

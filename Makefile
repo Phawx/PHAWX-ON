@@ -17,7 +17,7 @@ OBJ  = $(patsubst src/%.c,build/%.o,$(SRC)) build/phawx.res.o
 OUT  = build/PhawxON.exe
 
 # plugins/<name>/<name>.c (+ <name>.rc) -> build/plugins/<name>/<name>.dll
-PLUGIN_NAMES = ryzenadj example
+PLUGIN_NAMES = ryzenadj example rogally legiongo
 PLUGINS      = $(foreach p,$(PLUGIN_NAMES),build/plugins/$(p)/$(p).dll)
 PCFLAGS  = -Os -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type \
            -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 -Iplugins/sdk
@@ -42,19 +42,25 @@ build/plugins/%.res.o: plugins/%.rc
 	$(WINDRES) -O coff -o $@ $<
 
 build/plugins/%.dll: plugins/%.c build/plugins/%.res.o plugins/sdk/phawx_plugin.h
-	$(CC) $(PCFLAGS) $(PLDFLAGS) -o $@ $< build/plugins/$*.res.o
+	$(CC) $(PCFLAGS) $(PLDFLAGS) -o $@ $< build/plugins/$*.res.o $(PLIBS)
+
+# WMI through COM
+build/plugins/legiongo/legiongo.dll: PLIBS = -lole32 -loleaut32
 
 plugins: $(PLUGINS)
 
-# the zip ships the RyzenAdj plugin (off until turned on) and the SDK, with the
+# the zip ships the RyzenAdj and device plugins (off until turned on) and the SDK, with the
 # plugin guide as sdk/PLUGINS.md
 dist: $(OUT) $(PLUGINS)
 	@grep -q 'assemblyIdentity.*version="$(VERSION).0"' res/phawx.manifest || \
 		{ echo "res/phawx.manifest does not carry version $(VERSION).0 from src/version.h" >&2; exit 1; }
 	@rm -rf dist/PhawxON
-	@mkdir -p dist/PhawxON/plugins/ryzenadj dist/PhawxON/plugins/PawnIO/modules dist/PhawxON/sdk
+	@mkdir -p dist/PhawxON/plugins/ryzenadj dist/PhawxON/plugins/rogally dist/PhawxON/plugins/legiongo \
+		dist/PhawxON/plugins/PawnIO/modules dist/PhawxON/sdk
 	cp $(OUT) README.md LICENSE dist/PhawxON/
 	cp build/plugins/ryzenadj/ryzenadj.dll dist/PhawxON/plugins/ryzenadj/
+	cp build/plugins/rogally/rogally.dll dist/PhawxON/plugins/rogally/
+	cp build/plugins/legiongo/legiongo.dll dist/PhawxON/plugins/legiongo/
 	cp plugins/PawnIO/modules/*.bin plugins/PawnIO/modules/README.md plugins/PawnIO/modules/COPYING dist/PhawxON/plugins/PawnIO/modules/
 	cp plugins/sdk/phawx_plugin.h plugins/example/example.c plugins/example/example.rc docs/PLUGINS.md dist/PhawxON/sdk/
 	cd dist && rm -f PhawxON-$(VERSION).zip && zip -qr PhawxON-$(VERSION).zip PhawxON
@@ -69,8 +75,9 @@ $(SIM): tests/autotdp_sim.c src/autotdp.c src/phawx.h
 sim: $(SIM)
 	$(if $(filter Windows_NT,$(OS)),,WINEDEBUG=-all wine )$(SIM)
 
-# the portable logic (tests/logic_test.c), built with the native compiler against
-# tests/native/windows.h; runs anywhere
+# logic that does not need Windows, built and run with the host compiler:
+# tests/logic_test.c (config, registry, session log) against tests/native/windows.h,
+# and tests/hidpad_test.c (HID gamepad report parsing)
 HOSTCC ?= gcc
 TEST = build/logic_test
 $(TEST): tests/logic_test.c tests/native/windows.h src/config.c src/registry.c src/sessionlog.c $(wildcard src/*.h)
@@ -78,8 +85,14 @@ $(TEST): tests/logic_test.c tests/native/windows.h src/config.c src/registry.c s
 	$(HOSTCC) -O1 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
 		-Itests/native -Isrc -o $@ $<
 
-test: $(TEST)
+HIDTEST = build/test/hidpad_test
+$(HIDTEST): tests/hidpad_test.c src/hidpad.h
+	@mkdir -p build/test
+	$(HOSTCC) -O2 -std=c11 -Wall -Wextra -o $@ $<
+
+test: $(TEST) $(HIDTEST)
 	$(TEST)
+	$(HIDTEST)
 
 version:
 	@echo $(VERSION)

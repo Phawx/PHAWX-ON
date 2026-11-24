@@ -16,5 +16,7 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q mingw-w64 wine wine64
       - name: Build
         run: make -j4 all
+      - name: Logic tests
+        run: make test
       - name: AutoTDP simulation
         run: make sim

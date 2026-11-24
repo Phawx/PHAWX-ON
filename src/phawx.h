@@ -212,6 +212,7 @@ void cpuidex(uint32_t leaf, uint32_t sub, uint32_t r[4]);
 int  wp_read(const GUID *sub, const GUID *set, int dc, DWORD *v);
 int  wp_write(const GUID *sub, const GUID *set, DWORD ac, DWORD dc);
 int  wp_write_both(const GUID *sub, const GUID *set, DWORD v);
+int  wp_write_owned(const GUID *sub, const GUID *set, DWORD ac, DWORD dc, ph_ctl *owner); /* put back when owner goes to Default */
 void wp_commit(void);                 /* PowerSetActiveScheme(current) once after batch */
 int  wp_set_overlay(const GUID *ov);  /* power mode slider */
 extern const GUID GUID_SUB_PROCESSOR_, GUID_SUB_NONE_;
@@ -464,6 +465,16 @@ void fans_tick(void);                       /* about once a second, main thread 
 void fans_stop(void);                       /* exit and crash: the curves never touch a fan again */
 void ph_set_cpu_temp_reader(int (*fn)(int *celsius));        /* by the CPU backend that can read it */
 int  ph_cpu_temp(int *celsius);             /* 0 = ok */
+
+/* ---------- per-core clocks and temperatures (sys/hwinfo.c) ---------- */
+/* Hardware info's per-core rows. The CPU backend that can read them sets a reader:
+   it fills mhz[] and celsius[] for up to max cores (-1 = cannot be read, 0 = not
+   known yet) and returns how many cores it filled. Called about once a second, and
+   only while the System page is on screen. */
+#define PH_MAX_CORES 32
+void ph_set_core_reader(int (*fn)(int *mhz, int *celsius, int max));
+int  ph_core_cpu(int core);                  /* a logical processor of physical core i, -1 if none */
+int  ph_core_aperf(int *mhz, int max);       /* clock while busy per physical core (APERF/MPERF); cores, or -1 */
 
 /* ---------- embedded controller (sys/devices.c) ---------- */
 int   ph_ec_read(uint8_t reg, uint8_t *v);              /* ACPI EC 0x62/0x66 through PawnIO */

@@ -28,6 +28,8 @@ typedef struct IADLX3DBoost IADLX3DBoost;
 typedef struct IADLX3DImageSharpening IADLX3DImageSharpening;
 typedef struct IADLX3DFrameRateTargetControl IADLX3DFrameRateTargetControl;
 typedef struct IADLX3DRadeonSuperResolution IADLX3DRadeonSuperResolution;
+typedef struct IADLX3DSettingsServices1 IADLX3DSettingsServices1;
+typedef struct IADLX3DAMDFluidMotionFrames IADLX3DAMDFluidMotionFrames;
 
 typedef ADLX_RESULT (__cdecl *PFN_ADLXInitialize)(uint64_t version, IADLXSystem **ppSystem);
 typedef ADLX_RESULT (__cdecl *PFN_ADLXTerminate)(void);
@@ -178,6 +180,18 @@ typedef struct {
 } IADLX3DSettingsServicesVtbl;
 struct IADLX3DSettingsServices { const IADLX3DSettingsServicesVtbl *pVtbl; };
 
+/* I3DSettings1.h: IADLX3DSettingsServices1 (QueryInterface L"IADLX3DSettingsServices1")
+   continues the table above with GetResetShaderCache and Get3DSettingsChangedHandling,
+   then GetAMDFluidMotionFrames, which is system-wide (no GPU argument) */
+typedef struct {
+    ADLX_IUNKNOWN(IADLX3DSettingsServices1)
+    void *s3d_base[12];   /* GetAntiLag .. GetRadeonSuperResolution, as above */
+    ADLX_RESULT (__stdcall *GetResetShaderCache)(IADLX3DSettingsServices1 *, IADLXGPU *, IADLXInterface **);
+    ADLX_RESULT (__stdcall *Get3DSettingsChangedHandling)(IADLX3DSettingsServices1 *, IADLXInterface **);
+    ADLX_RESULT (__stdcall *GetAMDFluidMotionFrames)(IADLX3DSettingsServices1 *, IADLX3DAMDFluidMotionFrames **);
+} IADLX3DSettingsServices1Vtbl;
+struct IADLX3DSettingsServices1 { const IADLX3DSettingsServices1Vtbl *pVtbl; };
+
 #define S3D_HEAD(T) \
     ADLX_IUNKNOWN(T) \
     ADLX_RESULT (__stdcall *IsSupported)(T *, adlx_bool *); \
@@ -232,6 +246,12 @@ typedef struct {
     ADLX_RESULT (__stdcall *SetEnabled)(IADLX3DRadeonSuperResolution *, adlx_bool);
 } IADLX3DRadeonSuperResolutionVtbl;
 struct IADLX3DRadeonSuperResolution { const IADLX3DRadeonSuperResolutionVtbl *pVtbl; };
+
+typedef struct {
+    S3D_HEAD(IADLX3DAMDFluidMotionFrames)
+    ADLX_RESULT (__stdcall *SetEnabled)(IADLX3DAMDFluidMotionFrames *, adlx_bool);
+} IADLX3DAMDFluidMotionFramesVtbl;
+struct IADLX3DAMDFluidMotionFrames { const IADLX3DAMDFluidMotionFramesVtbl *pVtbl; };
 
 #define REL(p) do { if (p) { (p)->pVtbl->Release(p); (p) = NULL; } } while (0)
 
@@ -330,7 +350,7 @@ static uint64_t s_ms;
 
 enum { C_HDR, C_NAME, C_MHZ, C_LOAD, C_PWR, C_TEMP, C_MAX, C_MIN, C_PLIM,
        C_RHDR, C_CHILL, C_CHILLMIN, C_CHILLMAX, C_FRTC, C_FRTCFPS, C_ANTILAG, C_BOOST, C_BOOSTRES,
-       C_RSR, C_RIS, C_SHARP, C_RESTART, C_N };
+       C_RSR, C_RIS, C_SHARP, C_AFMF, C_RESTART, C_N };
 
 static ph_ctl ctls[C_N];
 
@@ -755,7 +775,7 @@ static int set_plim(ph_ctl *c, int32_t v)
 
 /* ---------- Radeon driver settings ---------- */
 enum { RS_CHILL, RS_CHILLMIN, RS_CHILLMAX, RS_FRTC, RS_FRTCFPS, RS_ANTILAG, RS_BOOST, RS_BOOSTRES,
-       RS_RSR, RS_RIS, RS_SHARP };
+       RS_RSR, RS_RIS, RS_SHARP, RS_AFMF };
 
 static const wchar_t *const rs_val[] = {
     [RS_CHILL] = L"KMD_ChillEnabled", [RS_CHILLMIN] = L"KMD_ChillMinFps", [RS_CHILLMAX] = L"KMD_ChillMaxFps",
@@ -763,7 +783,23 @@ static const wchar_t *const rs_val[] = {
     [RS_ANTILAG] = L"KMD_DeLagEnabled", [RS_BOOST] = L"KMD_RadeonBoostEnabled",
     [RS_BOOSTRES] = L"KMD_RadeonBoostMinResolution", [RS_RSR] = L"Gmx_RSREnabled",
     [RS_RIS] = L"KMD_USUEnable", [RS_SHARP] = L"KMD_USUSharpeningDegree",
+    [RS_AFMF] = L"DrvFrameGenEnabled",
 };
+
+/* the values are DWORDs, except AFMF's: REG_BINARY, 4 bytes little-endian 0 / 1 */
+static int rs_read(const wchar_t *key, int id, DWORD *d)
+{
+    if (id != RS_AFMF) return reg_get_dword(HKEY_LOCAL_MACHINE, key, rs_val[id], d);
+    DWORD sz = sizeof *d;
+    *d = 0;
+    return RegGetValueW(HKEY_LOCAL_MACHINE, key, rs_val[id], RRF_RT_REG_BINARY, NULL, d, &sz) == ERROR_SUCCESS ? 0 : -1;
+}
+
+static int rs_write(const wchar_t *key, int id, DWORD d)
+{
+    if (id != RS_AFMF) return reg_set_dword(HKEY_LOCAL_MACHINE, key, rs_val[id], d);
+    return reg_set_bin(HKEY_LOCAL_MACHINE, key, rs_val[id], &d, sizeof d);
+}
 
 static const int boost_res[] = { 50, 67, 84 };
 static const wchar_t *const boost_choices[] = { L"50%", L"67%", L"84%", NULL };
@@ -795,7 +831,7 @@ static int32_t rs_decode(int id, DWORD d)
         if (!(f >= 0.0f && f <= 1.0f)) return 50;
         return (int32_t)(f * 100.0f + 0.5f);
     }
-    case RS_CHILL: case RS_FRTC: case RS_ANTILAG: case RS_BOOST: case RS_RIS: return d ? 1 : 0;
+    case RS_CHILL: case RS_FRTC: case RS_ANTILAG: case RS_BOOST: case RS_RIS: case RS_AFMF: return d ? 1 : 0;
     default: return (int32_t)d;
     }
 }
@@ -869,6 +905,22 @@ static int rs_live_gpu(IADLXGPU *g, int id, int32_t v)
     return ok;
 }
 
+/* AFMF through ADLX: v < 0 only asks whether the driver supports it */
+static int afmf_live(int32_t v)
+{
+    IADLX3DSettingsServices1 *s1 = NULL;
+    IADLX3DAMDFluidMotionFrames *p = NULL;
+    adlx_bool sup = 0;
+    int ok = 0;
+    if (x.s3d->pVtbl->QueryInterface(x.s3d, L"IADLX3DSettingsServices1", (void **)&s1) != ADLX_OK || !s1) return 0;
+    if (s1->pVtbl->GetAMDFluidMotionFrames(s1, &p) == ADLX_OK && p) {
+        if (p->pVtbl->IsSupported(p, &sup) == ADLX_OK && sup) ok = v < 0 || p->pVtbl->SetEnabled(p, v != 0) == ADLX_OK;
+        REL(p);
+    }
+    REL(s1);
+    return ok;
+}
+
 static int rs_live(int id, int32_t v)
 {
     ensure_open();
@@ -883,6 +935,7 @@ static int rs_live(int id, int32_t v)
         }
         return ok;
     }
+    if (id == RS_AFMF) return afmf_live(v);
     for (int i = 0; i < x.ngpu; i++) ok |= rs_live_gpu(x.gpu[i], id, v);
     return ok;
 }
@@ -891,7 +944,7 @@ static int rs_get(ph_ctl *c, int32_t *o)
 {
     DWORD d;
     for (int i = 0; i < nkeys; i++)
-        if (reg_get_dword(HKEY_LOCAL_MACHINE, keys[i], rs_val[c->arg], &d) == 0) {
+        if (rs_read(keys[i], c->arg, &d) == 0) {
             *o = rs_decode(c->arg, d);
             return 0;
         }
@@ -904,8 +957,8 @@ static int rs_set(ph_ctl *c, int32_t v)
     DWORD d = rs_encode(c->arg, v);
     for (int i = 0; i < nkeys; i++) {
         DWORD old;
-        int same = reg_get_dword(HKEY_LOCAL_MACHINE, keys[i], rs_val[c->arg], &old) == 0 && old == d;
-        if (same || reg_set_dword(HKEY_LOCAL_MACHINE, keys[i], rs_val[c->arg], d) == 0) {
+        int same = rs_read(keys[i], c->arg, &old) == 0 && old == d;
+        if (same || rs_write(keys[i], c->arg, d) == 0) {
             n++;
             if (!same && c->arg == RS_FRTC && v)
                 reg_set_dword(HKEY_LOCAL_MACHINE, keys[i], L"KMD_FRTCInitialStatus", 1);
@@ -1013,8 +1066,10 @@ static ph_ctl ctls[C_N] = {
     [C_SHARP] = { .key = "radeon.sharpness", .label = L"Sharpness", .type = CT_SLIDER, .page = PG_GPU,
                   .flags = RF | CF_ADVANCED, .min = 10, .max = 100, .step = 10, .def = 50, .unit = L"%",
                   .get = rs_get, .set = rs_set, .fmt = fmt_pct, .arg = RS_SHARP, .order = 161 },
+    [C_AFMF] = { .key = "radeon.afmf", .label = L"AMD Fluid Motion Frames", .type = CT_TOGGLE, .page = PG_GPU,
+                 .flags = RF, .get = rs_get, .set = rs_set, .fmt = fmt_onoff, .arg = RS_AFMF, .order = 162 },
     [C_RESTART] = { .key = "radeon.restart", .label = L"Restart GPU driver", .type = CT_ACTION, .page = PG_GPU,
-                    .flags = CF_NOSAVE | CF_DANGER | CF_ADVANCED, .set = act_restart, .fmt = fmt_restart, .order = 162 },
+                    .flags = CF_NOSAVE | CF_DANGER | CF_ADVANCED, .set = act_restart, .fmt = fmt_restart, .order = 163 },
 };
 
 /* ---------- clock domain ---------- */
@@ -1121,6 +1176,11 @@ static int amd_init(void)
     }
     if (!nkeys)
         for (int i = C_RHDR; i < C_N; i++) ctls[i].flags |= CF_HIDDEN;
+    else {
+        /* AFMF needs an RDNA 2 or newer GPU: shown where the driver keeps the value or ADLX says it is supported */
+        int32_t v;
+        if (rs_get(&ctls[C_AFMF], &v) && !(mode == M_ADLX && x.s3d && afmf_live(-1))) ctls[C_AFMF].flags |= CF_HIDDEN;
+    }
     ph_register_ctls(ctls, C_N);
     return 0;
 }

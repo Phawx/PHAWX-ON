@@ -150,6 +150,138 @@ static void f_fps(const ph_ctl *c, int32_t v, wchar_t *b, int n)
     else lstrcpynW(b, L"No game", n);
 }
 
+/* ---------- per-core clocks and temperatures ---------- */
+
+/* Up to four cores to a line: "Core clocks 1-4  3.12 · 2.90 · 1.20 · 0.80 GHz".
+   The rows' get() takes a fresh sample at most once a second, and the UI only calls
+   it while the System page is shown, so nothing is read otherwise. */
+#define CORE_LINE 4
+#define CORE_ROWS (PH_MAX_CORES / CORE_LINE)
+
+static int (*core_rd)(int *mhz, int *celsius, int max);
+static int core_mhz[PH_MAX_CORES], core_c[PH_MAX_CORES], core_n;
+static uint64_t core_ms;
+static ph_ctl core_rows[2 * CORE_ROWS];
+static wchar_t core_lbl[2 * CORE_ROWS][40];
+static int16_t core_first[PH_MAX_CORES];
+static int core_first_ok;
+
+void ph_set_core_reader(int (*fn)(int *mhz, int *celsius, int max)) { if (!core_rd) core_rd = fn; }
+
+int ph_core_cpu(int core)
+{
+    if (!core_first_ok) {
+        core_first_ok = 1;
+        for (int k = 0; k < PH_MAX_CORES; k++) core_first[k] = -1;
+        int n = g_plat.nlogical > 256 ? 256 : g_plat.nlogical;
+        for (int i = n - 1; i >= 0; i--)
+            if (g_plat.core_of[i] < PH_MAX_CORES) core_first[g_plat.core_of[i]] = (int16_t)i;
+    }
+    return core >= 0 && core < PH_MAX_CORES ? core_first[core] : -1;
+}
+
+/* APERF / MPERF count only while the core runs, MPERF at the base clock: their
+   ratio is the average clock while busy. AMD has read-only copies at C00000E7/E8. */
+static const uint32_t ap_msrs[2][2] = { { 0xE8, 0xE7 }, { 0xC00000E8, 0xC00000E7 } };
+static uint64_t ap_last[PH_MAX_CORES][2];
+static int ap_set = -1, ap_base;
+
+static int ap_read(int cpu, uint64_t *a, uint64_t *m)
+{
+    return drv_rdmsr_cpu(ap_msrs[ap_set][0], cpu, a) || drv_rdmsr_cpu(ap_msrs[ap_set][1], cpu, m) ? -1 : 0;
+}
+
+int ph_core_aperf(int *mhz, int max)
+{
+    uint64_t a, m;
+    if (!drv_ok() || ap_set == -2) return -1;
+    int n = g_plat.ncores > 0 ? g_plat.ncores : g_plat.nlogical;
+    if (n > max) n = max;
+    if (n > PH_MAX_CORES) n = PH_MAX_CORES;
+    if (ap_set < 0) {
+        DWORD d = 0;
+        reg_get_dword(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", L"~MHz", &d);
+        ap_base = (int)d;
+        int cpu = ph_core_cpu(0);
+        for (ap_set = 0; ap_set < (g_plat.vendor == VENDOR_AMD ? 2 : 1); ap_set++)
+            if (ap_read(cpu, &a, &m) == 0) break;
+        if (ap_base < 400 || ap_base > 6000 || ap_set >= (g_plat.vendor == VENDOR_AMD ? 2 : 1) || n <= 0) {
+            ap_set = -2;
+            ph_log("hwinfo: no APERF/MPERF");
+            return -1;
+        }
+    }
+    for (int k = 0; k < n; k++) {
+        int cpu = ph_core_cpu(k);
+        mhz[k] = -1;
+        if (cpu < 0 || ap_read(cpu, &a, &m)) continue;
+        uint64_t da = a - ap_last[k][0], dm = m - ap_last[k][1];
+        mhz[k] = 0;
+        if (ap_last[k][1] && dm > 1000 && da / dm < 4) mhz[k] = (int)((double)ap_base * (double)da / (double)dm + 0.5);
+        ap_last[k][0] = a;
+        ap_last[k][1] = m;
+    }
+    return n;
+}
+
+static void core_sample(void)
+{
+    uint64_t now = ph_ms();
+    if (core_ms && now - core_ms < 900) return;
+    core_ms = now;
+    for (int i = 0; i < PH_MAX_CORES; i++) core_mhz[i] = core_c[i] = -1;
+    core_n = core_rd ? core_rd(core_mhz, core_c, PH_MAX_CORES) : 0;
+    if (core_n > PH_MAX_CORES) core_n = PH_MAX_CORES;
+}
+
+static int core_get(ph_ctl *c, int32_t *out) { (void)c; core_sample(); *out = 0; return 0; }
+
+/* arg: first core of the line, +256 for temperatures */
+static void f_cores(const ph_ctl *c, int32_t v, wchar_t *b, int n)
+{
+    (void)v;
+    int temp = c->arg >= 256, k0 = c->arg & 255, len = 0, any = 0;
+    b[0] = 0;
+    for (int k = k0; k < k0 + CORE_LINE && k < core_n && len < n - 1; k++) {
+        int x = temp ? core_c[k] : core_mhz[k];
+        const wchar_t *sep = k > k0 ? L" \x00B7 " : L"";
+        int w;
+        if (x <= 0) w = ph_swprintf(b + len, n - len, L"%s--", sep);
+        else if (temp) w = ph_swprintf(b + len, n - len, L"%s%d", sep, x);
+        else w = ph_swprintf(b + len, n - len, L"%s%d.%02d", sep, x / 1000, x % 1000 / 10);
+        if (w <= 0) break;
+        len += w;
+        any |= x > 0;
+    }
+    if (!any) lstrcpynW(b, L"--", n);
+    else ph_swprintf(b + len, n - len, temp ? L" \x00B0" L"C" : L" GHz");
+}
+
+static void core_init(void)
+{
+    if (!core_rd) return;
+    core_sample();
+    int n = core_n, has_mhz = 0, has_c = 0;
+    for (int k = 0; k < n; k++) { has_mhz |= core_mhz[k] >= 0; has_c |= core_c[k] >= 0; }
+    if (n <= 0 || (!has_mhz && !has_c)) { core_rd = NULL; return; }
+    int lines = (n + CORE_LINE - 1) / CORE_LINE, r = 0;
+    for (int t = 0; t < 2; t++) {
+        if (t ? !has_c : !has_mhz) continue;
+        for (int i = 0; i < lines; i++, r++) {
+            const wchar_t *what = t ? L"Core temperatures" : L"Core clocks";
+            int a = i * CORE_LINE + 1, z = a + CORE_LINE - 1 > n ? n : a + CORE_LINE - 1;
+            if (n <= CORE_LINE) lstrcpynW(core_lbl[r], what, PH_ARRAY(core_lbl[r]));
+            else if (a == z) ph_swprintf(core_lbl[r], PH_ARRAY(core_lbl[r]), L"%s %d", what, a);
+            else ph_swprintf(core_lbl[r], PH_ARRAY(core_lbl[r]), L"%s %d\x2013%d", what, a, z);
+            core_rows[r] = (ph_ctl){ .label = core_lbl[r], .type = CT_INFO, .page = PG_SYSTEM, .flags = CF_TABLE,
+                                     .order = (int16_t)(O_CPU + 150 + r), .get = core_get, .fmt = f_cores,
+                                     .arg = i * CORE_LINE + (t ? 256 : 0) };
+        }
+    }
+    core_ms = 0;
+    ph_register_ctls(core_rows, r);
+}
+
 /* ---------- copies of other rows ---------- */
 
 typedef struct proxy {
@@ -315,6 +447,7 @@ static int hw_init(void)
     sync_proxies();
     ph_register_ctl(&sec_hw);
     ph_register_ctls(rows, R_N);
+    core_init();
     for (int i = 0; i < npx; i++) ph_register_ctl(&px[i].c);
     return 0;
 }

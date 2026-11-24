@@ -62,6 +62,9 @@ static const smu_cmd cmds[] = {
     {S_APU_SLOW_LIMIT, MB_MP1,  0x21, G_RN}, {S_APU_SLOW_LIMIT, MB_MP1, 0x23, G_RMB | G_PHX | G_STX},
     {S_MAX_GFXCLK,     MB_MP1,  0x46, G_RV | B(AF_LUCIENNE)},
     {S_MIN_GFXCLK,     MB_MP1,  0x47, G_RV | B(AF_LUCIENNE)},
+    /* the SMU side of ALIB's DC / AC profile hints, argument 0 (RyzenAdj); not on Dragon/Fire Range */
+    {S_POWER_SAVING,   MB_MP1,  0x19, G_RV}, {S_POWER_SAVING, MB_MP1, 0x12, G_MOB},
+    {S_MAX_PERF,       MB_MP1,  0x18, G_RV}, {S_MAX_PERF, MB_MP1, 0x11, G_MOB},
 };
 
 static int fam = AF_UNKNOWN;
@@ -77,6 +80,20 @@ static uint16_t pm_xfer_msg;
 static uint32_t pm_xfer_arg;
 static int pm_ok;
 static double pm_last;
+static uint32_t pm_ver;
+
+/* per-core temperature and clock arrays (floats, °C and GHz) of the table versions
+   docs/research/amd_smu.md §6.4 lists; others (Phoenix, Hawk Point, Rembrandt...)
+   are not known */
+typedef struct { uint32_t lo, hi; uint16_t temp, clk; uint8_t n; } core_lay;
+static const core_lay core_lays[] = {
+    { 0x370000, 0x370004, 0x340, 0x3A0, 8 },     /* Renoir, Lucienne */
+    { 0x370005, 0x370005, 0x35C, 0x3BC, 8 },
+    { 0x400004, 0x400005, 0x360, 0x3C0, 8 },     /* Cezanne */
+    { 0x5D0008, 0x5D000B, 0xA38, 0xA68, 12 },    /* Strix Point */
+    { 0x64010C, 0x64010C, 0xC10, 0xC50, 16 },    /* Strix Halo */
+    { 0x64020C, 0x64020C, 0xC10, 0xC50, 16 },
+};
 
 static int smn_rd(uint32_t a, uint32_t *v)
 {
@@ -188,6 +205,8 @@ static void pm_setup(void)
     else return;
     if (send(MB_PSMU, get, a) != 0) return;
     pm_addr = wide ? ((uint64_t)a[1] << 32) | a[0] : a[0];
+    uint32_t va[6] = { 0 };
+    if (send(MB_PSMU, (f & G_RV) ? 0x0C : 0x06, va) == 0) pm_ver = va[0];
     if (!pm_addr) return;
     for (int tries = 0; tries < 2; tries++) {
         float lim;
@@ -205,6 +224,7 @@ int smu_init(void)
     mb_ok[0] = mb_ok[1] = 0;
     pm_ok = 0;
     pm_addr = 0;
+    pm_ver = 0;
     ver = 0;
     memset(dead, 0, sizeof dead);
     if (fam == AF_UNKNOWN || !mb || !drv_ok()) { mb = NULL; return -1; }
@@ -229,6 +249,7 @@ int smu_init(void)
     ph_log("smu: family %d, fw %u.%u.%u, psmu %d", fam,
            (ver >> 16) & 0xFF, (ver >> 8) & 0xFF, ver & 0xFF, mb_ok[MB_PSMU]);
     pm_setup();
+    if (pm_ok) ph_log("smu: power table 0x%06x", pm_ver);
     return 0;
 }
 
@@ -297,4 +318,17 @@ int smu_pm_get(int field, float *v)
     default: return -1;
     }
     return pm_read_raw((uint32_t)off, v);
+}
+
+int smu_pm_cores(float *ghz, float *celsius, int max)
+{
+    const core_lay *l = NULL;
+    if (!pm_ok) return -1;
+    for (int i = 0; i < PH_ARRAY(core_lays); i++)
+        if (pm_ver >= core_lays[i].lo && pm_ver <= core_lays[i].hi) l = &core_lays[i];
+    if (!l || smu_pm_refresh()) return -1;
+    int n = l->n < max ? l->n : max;
+    for (int i = 0; i < n; i++)
+        if (pm_read_raw(l->clk + 4u * (uint32_t)i, &ghz[i]) || pm_read_raw(l->temp + 4u * (uint32_t)i, &celsius[i])) return -1;
+    return n;
 }

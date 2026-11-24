@@ -3,6 +3,9 @@
 #include <winternl.h>
 #include <hidusage.h>
 #include <hidpi.h>
+#include <hidsdi.h>
+#include <setupapi.h>
+#include "hidpad.h"
 
 #define TM_INPUT      20
 #define POLL_OPEN_MS  16
@@ -19,6 +22,11 @@
 
 #define HIDP_OK 0x00110000L
 #define TOUCH_SCREEN_USAGE 0x04
+#define HID_MAX 4
+
+typedef char hp_bits_match[(HP_A == XINPUT_GAMEPAD_A && HP_Y == XINPUT_GAMEPAD_Y && HP_BACK == XINPUT_GAMEPAD_BACK &&
+                            HP_RB == XINPUT_GAMEPAD_RIGHT_SHOULDER && HP_GUIDE == BTN_GUIDE && HP_LT == BTN_LT &&
+                            HP_RT == BTN_RT && HP_RIGHT == XINPUT_GAMEPAD_DPAD_RIGHT) ? 1 : -1];
 
 /* XInputGetStateEx (ordinal 100) writes an XINPUT_GAMEPAD_EX with a trailing reserved DWORD */
 typedef struct xstate_ex {
@@ -31,6 +39,11 @@ typedef NTSTATUS (NTAPI *hp_caps_fn)(PHIDP_PREPARSED_DATA, PHIDP_CAPS);
 typedef NTSTATUS (NTAPI *hp_vcaps_fn)(HIDP_REPORT_TYPE, PHIDP_VALUE_CAPS, PUSHORT, PHIDP_PREPARSED_DATA);
 typedef NTSTATUS (NTAPI *hp_val_fn)(HIDP_REPORT_TYPE, USAGE, USHORT, USAGE, PULONG, PHIDP_PREPARSED_DATA, PCHAR, ULONG);
 typedef NTSTATUS (NTAPI *hp_usages_fn)(HIDP_REPORT_TYPE, USAGE, USHORT, PUSAGE, PULONG, PHIDP_PREPARSED_DATA, PCHAR, ULONG);
+typedef BOOLEAN (NTAPI *hd_attr_fn)(HANDLE, PHIDD_ATTRIBUTES);
+typedef BOOLEAN (NTAPI *hd_pp_fn)(HANDLE, PHIDP_PREPARSED_DATA *);
+typedef BOOLEAN (NTAPI *hd_freepp_fn)(PHIDP_PREPARSED_DATA);
+typedef BOOLEAN (NTAPI *hd_nbuf_fn)(HANDLE, ULONG);
+typedef void (NTAPI *hd_guid_fn)(LPGUID);
 
 static HWND owner;
 static HMODULE xdll, hdll;
@@ -40,6 +53,11 @@ static hp_caps_fn hp_caps;
 static hp_vcaps_fn hp_vcaps;
 static hp_val_fn hp_val;
 static hp_usages_fn hp_usages;
+static hd_attr_fn hd_attr;
+static hd_pp_fn hd_pp;
+static hd_freepp_fn hd_freepp;
+static hd_nbuf_fn hd_nbuf;
+static hd_guid_fn hd_guid;
 
 static uint32_t combo;
 static int menu_open;
@@ -59,6 +77,24 @@ static int pad_hold, key_hold, kbd_on;
 static int cap_phase;
 static uint32_t cap_peak;
 static uint64_t cap_deadline;
+static uint64_t toggle_quiet;
+
+/* Pads read over HID (hidpad.h): opened only when one is present, found by a scan at
+   start and after a device change, never polled for. Each keeps one overlapped
+   read in flight; the input timer takes what arrived and the latest state. */
+typedef struct hid_pad {
+    HANDLE h;
+    OVERLAPPED ov;
+    uint8_t *buf;
+    DWORD len;
+    uint64_t id;            /* hash of the device path */
+    uint8_t kind, bt, match, fresh, stick, pending, seen;
+    hp_state st;
+    uint32_t latch;         /* momentary presses since the last poll (ROG Ally keys) */
+} hid_pad;
+
+static hid_pad hpad[HID_MAX];
+static int hid_n, hid_rescan;
 
 typedef struct touch_dev {
     HANDLE h;
@@ -91,14 +127,17 @@ static int popcount(uint32_t v)
 static int any_pad(void)
 {
     for (int i = 0; i < XUSER_MAX_COUNT; i++) if (pad_on[i]) return 1;
-    return 0;
+    return hid_n > 0;
 }
+
+/* Guide counts when XInput reports it or a HID pad with one is there */
+static int guide_ok(void) { return have_guide || hid_n > 0; }
 
 static void rearm(void)
 {
     if (!owner) return;
     UINT p = 0;
-    if (xget) {
+    if (xget || hid_n) {
         if (menu_open || cap_phase) p = POLL_OPEN_MS;
         else if (any_pad()) p = POLL_IDLE_MS;
         else p = SCAN_MS;
@@ -107,6 +146,24 @@ static void rearm(void)
     cur_period = p;
     if (p) SetTimer(owner, TM_INPUT, p, NULL);
     else KillTimer(owner, TM_INPUT);
+}
+
+/* the left stick as a d-pad direction (1 up, 2 down, 3 left, 4 right), with hysteresis */
+static uint8_t stick_step(uint8_t *dir, int ax, int ay)
+{
+    int mx = ax < 0 ? -ax : ax, my = ay < 0 ? -ay : ay;
+    uint8_t d = *dir;
+    if (d && (mx > 10000 || my > 10000)) {
+        int keep = (d == 1 && ay > 10000) || (d == 2 && ay < -10000) ||
+                   (d == 3 && ax < -10000) || (d == 4 && ax > 10000);
+        if (!keep) d = 0;
+    } else d = 0;
+    if (!d && (mx > 16000 || my > 16000)) {
+        if (my >= mx) d = ay > 0 ? 1 : 2;
+        else d = ax < 0 ? 3 : 4;
+    }
+    *dir = d;
+    return d;
 }
 
 static uint32_t read_pad(int i, int *ok)
@@ -120,28 +177,14 @@ static uint32_t read_pad(int i, int *ok)
     if (!have_guide) b &= ~BTN_GUIDE;
     if (g->bLeftTrigger > 100) b |= BTN_LT;
     if (g->bRightTrigger > 100) b |= BTN_RT;
-
-    int ax = g->sThumbLX, ay = g->sThumbLY;
-    int mx = ax < 0 ? -ax : ax, my = ay < 0 ? -ay : ay;
-    uint8_t d = stick_dir[i];
-    if (d && (mx > 10000 || my > 10000)) {
-        int keep = (d == 1 && ay > 10000) || (d == 2 && ay < -10000) ||
-                   (d == 3 && ax < -10000) || (d == 4 && ax > 10000);
-        if (!keep) d = 0;
-    } else d = 0;
-    if (!d && (mx > 16000 || my > 16000)) {
-        if (my >= mx) d = ay > 0 ? 1 : 2;
-        else d = ax < 0 ? 3 : 4;
-    }
-    stick_dir[i] = d;
-    return b | ((uint32_t)d << 24);
+    return b | ((uint32_t)stick_step(&stick_dir[i], g->sThumbLX, g->sThumbLY) << 24);
 }
 
 static int combo_hit(uint32_t b)
 {
     b &= 0xFFFFFFu;
     if (combo) return (b & combo) == combo;
-    if (have_guide && (b & BTN_GUIDE)) return 1;
+    if (b & BTN_GUIDE) return 1;    /* only set by sources that have one */
     return (b & BTN_DEFAULT_ALT) == BTN_DEFAULT_ALT;
 }
 
@@ -223,16 +266,167 @@ static void capture_step(uint32_t all, uint64_t now)
     PostMessageW(owner, WM_PH_REFRESH, 0, 0);
 }
 
+/* ---------- HID pads ---------- */
+
+static void hid_close(hid_pad *p)
+{
+    if (p->h) {
+        if (p->pending && CancelIoEx(p->h, &p->ov)) {
+            DWORD n;
+            GetOverlappedResult(p->h, &p->ov, &n, TRUE);
+        }
+        CloseHandle(p->h);
+    }
+    if (p->ov.hEvent) CloseHandle(p->ov.hEvent);
+    ph_free(p->buf);
+    ZeroMemory(p, sizeof *p);
+}
+
+static void hid_drop(int i)
+{
+    hid_close(&hpad[i]);
+    if (i != hid_n - 1) { hpad[i] = hpad[hid_n - 1]; ZeroMemory(&hpad[hid_n - 1], sizeof hpad[0]); }
+    hid_n--;
+}
+
+static uint64_t path_id(const wchar_t *s)
+{
+    uint64_t h = 14695981039346656037ull;
+    for (; *s; s++) { h ^= (uint64_t)(*s | 0x20); h *= 1099511628211ull; }
+    return h;
+}
+
+/* only paths that can be one of hidpad.h's vendors are opened at all */
+static int path_maybe(const wchar_t *s)
+{
+    wchar_t v[5] = { 0 };
+    for (; *s; s++) {
+        for (int k = 0; k < 4; k++) v[k] = v[k + 1];
+        v[3] = (wchar_t)(*s | 0x20);
+        if (!lstrcmpW(v, L"054c") || !lstrcmpW(v, L"0b05")) return 1;
+    }
+    return 0;
+}
+
+static void hid_open(const wchar_t *path, uint64_t id)
+{
+    if (hid_n >= HID_MAX) return;
+    HANDLE q = CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (q == INVALID_HANDLE_VALUE) return;
+    HIDD_ATTRIBUTES a;
+    a.Size = sizeof a;
+    const hp_dev *dv = hd_attr(q, &a) ? hp_match(a.VendorID, a.ProductID) : NULL;
+    HIDP_CAPS caps;
+    PHIDP_PREPARSED_DATA pp = NULL;
+    int ok = 0;
+    if (dv && hd_pp(q, &pp)) {
+        ok = hp_caps(pp, &caps) == HIDP_OK && caps.UsagePage == dv->usage_page &&
+             (!dv->usage || caps.Usage == dv->usage) && caps.InputReportByteLength >= 2 &&
+             caps.InputReportByteLength <= 1024;
+        hd_freepp(pp);
+    }
+    CloseHandle(q);
+    if (!ok) return;
+
+    hid_pad *p = &hpad[hid_n];
+    ZeroMemory(p, sizeof *p);
+    p->h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                       FILE_FLAG_OVERLAPPED, NULL);
+    if (p->h == INVALID_HANDLE_VALUE) { p->h = NULL; return; }   /* e.g. another app holds it exclusively */
+    p->len = caps.InputReportByteLength;
+    p->buf = (uint8_t *)ph_alloc(p->len);
+    p->ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!p->buf || !p->ov.hEvent) { hid_close(p); return; }
+    p->id = id;
+    p->kind = dv->kind;
+    p->bt = dv->kind != HP_ALLY && p->len != 64;
+    p->fresh = 1;
+    p->seen = 1;
+    /* a gamepad only needs its latest state: few buffered reports, little to drain */
+    if (dv->kind != HP_ALLY) hd_nbuf(p->h, 2);
+    hid_n++;
+    ph_log("input: HID pad %04x:%04x (%s)", a.VendorID, a.ProductID,
+           dv->kind == HP_ALLY ? "ROG Ally keys" : p->bt ? "Bluetooth" : "USB");
+}
+
+/* keep the pads still there, open new ones, close the ones that went */
+static void hid_scan(void)
+{
+    hid_rescan = 0;
+    if (!hd_guid || !hp_caps) return;
+    for (int i = 0; i < hid_n; i++) hpad[i].seen = 0;
+    GUID g;
+    hd_guid(&g);
+    HDEVINFO di = SetupDiGetClassDevsW(&g, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (di != INVALID_HANDLE_VALUE) {
+        SP_DEVICE_INTERFACE_DATA d;
+        d.cbSize = sizeof d;
+        for (DWORD i = 0; SetupDiEnumDeviceInterfaces(di, NULL, &g, i, &d); i++) {
+            DWORD need = 0;
+            SetupDiGetDeviceInterfaceDetailW(di, &d, NULL, 0, &need, NULL);
+            if (need < sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W) || need > 4096) continue;
+            SP_DEVICE_INTERFACE_DETAIL_DATA_W *det = (SP_DEVICE_INTERFACE_DETAIL_DATA_W *)ph_alloc(need);
+            if (!det) break;
+            det->cbSize = sizeof *det;
+            if (SetupDiGetDeviceInterfaceDetailW(di, &d, det, need, NULL, NULL) && path_maybe(det->DevicePath)) {
+                uint64_t id = path_id(det->DevicePath);
+                int k = 0;
+                while (k < hid_n && hpad[k].id != id) k++;
+                if (k < hid_n) hpad[k].seen = 1;
+                else hid_open(det->DevicePath, id);
+            }
+            ph_free(det);
+        }
+        SetupDiDestroyDeviceInfoList(di);
+    }
+    for (int i = hid_n - 1; i >= 0; i--) if (!hpad[i].seen) hid_drop(i);
+}
+
+static void hid_take(hid_pad *p, DWORD n)
+{
+    hp_state st;
+    if (p->kind == HP_ALLY) p->latch |= hp_ally_parse(p->buf, (int)n);
+    else if (hp_ps_parse(p->kind, p->bt, p->buf, (int)n, &st)) p->st = st;
+}
+
+/* drain what arrived since the last poll; 0 when the pad is gone */
+static int hid_pump(hid_pad *p)
+{
+    for (int k = 0; k < 64; k++) {
+        if (p->pending) {
+            if (!HasOverlappedIoCompleted(&p->ov)) return 1;
+            DWORD n = 0;
+            p->pending = 0;
+            if (!GetOverlappedResult(p->h, &p->ov, &n, FALSE)) return 0;
+            hid_take(p, n);
+        }
+        ResetEvent(p->ov.hEvent);
+        if (!ReadFile(p->h, p->buf, p->len, NULL, &p->ov) && GetLastError() != ERROR_IO_PENDING) return 0;
+        p->pending = 1;
+    }
+    return 1;
+}
+
+static uint32_t hid_read(hid_pad *p, int *ok)
+{
+    *ok = hid_pump(p);
+    if (!*ok) return 0;
+    uint32_t b = p->st.btn | p->latch;
+    p->latch = 0;
+    return b | ((uint32_t)stick_step(&p->stick, p->st.lx, p->st.ly) << 24);
+}
+
 void input_on_timer(void)
 {
-    if (!xget) { rearm(); return; }
+    if (hid_rescan) hid_scan();
+    if (!xget && !hid_n) { rearm(); return; }
     uint64_t now = ph_ms();
     int scan = now >= next_scan;
     if (scan) next_scan = now + SCAN_MS;
 
     uint32_t all = 0;
     int fire = 0;
-    for (int i = 0; i < XUSER_MAX_COUNT; i++) {
+    for (int i = 0; i < XUSER_MAX_COUNT && xget; i++) {
         if (!pad_on[i] && !scan) continue;
         int ok;
         uint32_t b = read_pad(i, &ok);
@@ -250,12 +444,26 @@ void input_on_timer(void)
         if (hit && !pad_match[i] && !cap_phase) fire = 1;
         pad_match[i] = (uint8_t)hit;
     }
+    for (int i = hid_n - 1; i >= 0; i--) {
+        hid_pad *p = &hpad[i];
+        int ok;
+        uint32_t b = hid_read(p, &ok);
+        if (!ok) { hid_drop(i); continue; }
+        all |= b;
+        int hit = combo_hit(b);
+        if (hit && !p->match && !p->fresh && !cap_phase) fire = 1;
+        p->match = (uint8_t)hit;
+        p->fresh = 0;
+    }
 
     suppress &= all;
     if (cap_phase) {
         suppress = all;
         capture_step(all, now);
-    } else if (fire) {
+    } else if (fire && now >= toggle_quiet) {
+        /* one press seen by two sources (a pad and the virtual Xbox pad Steam makes
+           of it) toggles once */
+        toggle_quiet = now + 300;
         suppress = all;
         nav_prev = nav_bits(all);
         PostMessageW(owner, WM_PH_TOGGLE, 0, 0);
@@ -449,7 +657,8 @@ void input_on_devchange(void)
 {
     touch_flush();
     next_scan = 0;
-    if (owner && xget) {
+    if (hd_guid) hid_rescan = 1;    /* the next timer tick: one scan for a burst of changes */
+    if (owner && (xget || hid_rescan)) {
         cur_period = (UINT)-1;
         SetTimer(owner, TM_INPUT, 50, NULL);
     }
@@ -490,15 +699,22 @@ void input_init(HWND o)
         hp_val = (hp_val_fn)(void *)GetProcAddress(hdll, "HidP_GetUsageValue");
         hp_usages = (hp_usages_fn)(void *)GetProcAddress(hdll, "HidP_GetUsages");
         if (!hp_caps || !hp_vcaps || !hp_val || !hp_usages) hp_caps = NULL, hp_vcaps = NULL, hp_val = NULL, hp_usages = NULL;
+        hd_attr = (hd_attr_fn)(void *)GetProcAddress(hdll, "HidD_GetAttributes");
+        hd_pp = (hd_pp_fn)(void *)GetProcAddress(hdll, "HidD_GetPreparsedData");
+        hd_freepp = (hd_freepp_fn)(void *)GetProcAddress(hdll, "HidD_FreePreparsedData");
+        hd_nbuf = (hd_nbuf_fn)(void *)GetProcAddress(hdll, "HidD_SetNumInputBuffers");
+        hd_guid = (hd_guid_fn)(void *)GetProcAddress(hdll, "HidD_GetHidGuid");
+        if (!hp_caps || !hd_attr || !hd_pp || !hd_freepp || !hd_nbuf) hd_guid = NULL;
     }
+    hid_scan();
 
     combo = (uint32_t)cfg_get_int("global", "input.combo", 0) & 0x3FFFFu;
     if (combo & ~(uint32_t)0x3F7FFu) combo = 0;
-    if (!have_guide) combo &= ~BTN_GUIDE;
+    if (!guide_ok()) combo &= ~BTN_GUIDE;
 
     if (owner && hp_val) raw_register(1);
     next_scan = 0;
-    if (owner && xget) { cur_period = (UINT)-1; SetTimer(owner, TM_INPUT, 50, NULL); }
+    if (owner && (xget || hid_n)) { cur_period = (UINT)-1; SetTimer(owner, TM_INPUT, 50, NULL); }
 }
 
 void input_menu_open(int open)
@@ -521,6 +737,8 @@ void input_shutdown(void)
     }
     cur_period = (UINT)-1;
     touch_flush();
+    while (hid_n) hid_drop(hid_n - 1);
+    hd_guid = NULL;
     ph_free(rbuf);
     rbuf = NULL;
     rbuf_n = 0;
@@ -534,7 +752,7 @@ void input_shutdown(void)
 
 void input_capture_combo(void)
 {
-    if (!xget) { ui_toast(L"No controller support"); return; }
+    if (!xget && !hid_n) { ui_toast(L"No controller support"); return; }
     cap_phase = 1;
     cap_peak = 0;
     cap_deadline = ph_ms() + CAPTURE_MS;
@@ -549,9 +767,10 @@ uint32_t input_combo(void) { return combo; }
 void input_set_combo(uint32_t mask)
 {
     mask &= 0x3F7FFu;
-    if (!have_guide) mask &= ~BTN_GUIDE;
+    if (!guide_ok()) mask &= ~BTN_GUIDE;
     combo = mask;
     for (int i = 0; i < XUSER_MAX_COUNT; i++) pad_match[i] = (uint8_t)combo_hit(pad_btn[i]);
+    for (int i = 0; i < hid_n; i++) hpad[i].match = 1;   /* a combo held while it was set does not fire */
     cfg_set_int("global", "input.combo", (int)mask);
 }
 
@@ -569,7 +788,7 @@ void combo_to_text(uint32_t mask, wchar_t *buf, int n)
     if (n <= 0) return;
     buf[0] = 0;
     if (!mask) {
-        lstrcpynW(buf, have_guide ? L"Guide or Back+Start" : L"Back+Start", n);
+        lstrcpynW(buf, guide_ok() ? L"Guide or Back+Start" : L"Back+Start", n);
         return;
     }
     int len = 0;
