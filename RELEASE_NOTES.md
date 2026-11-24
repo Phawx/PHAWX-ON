@@ -1,3 +1,21 @@
+Phawx ON 1.5
+
+Everything new here is untested on real hardware so far. Each hardware setting still starts at Default, so nothing changes until you set it.
+
+New
+- **Plugged in and on battery.** Any setting can have its own value on battery. A *Settings for: Plugged in / On battery* switch at the top of the Quick page picks which set you are editing, and starts on the one you are using. Rows with a battery value show a small battery mark; hold reset on the battery set to make a row the same as plugged in again. Phawx ON swaps the sets when you plug in or unplug, and after sleep. Game profiles keep their own battery values. Note that on battery, a setting you change becomes its battery value, and the plugged-in value comes back when you plug in.
+- **AutoTDP per game.** Game profiles now remember whether AutoTDP is on. It starts or stops when the game comes to the front, and goes back to your usual setting when it leaves.
+- **TDP and GPU hotkeys.** Ctrl+Alt+Up/Down raise and lower the TDP, Ctrl+Alt+Shift+Up/Down the GPU max clock, one step per press, with a toast showing the new value. While AutoTDP holds the GPU clock the toast says so instead. Settings → *TDP and GPU hotkeys* turns them off and says when another app already uses the keys.
+- **PlayStation pads and ROG Ally keys.** DualSense, DualSense Edge and DualShock 4 (USB and Bluetooth) open and drive the overlay; PS is the Guide button. The ROG Ally's Armoury Crate and Command Center keys open it too. Nothing is read when no such pad is connected.
+- **Device plugins**, off by default: **ROG Ally** (operating mode and fan speeds) and **Legion Go** (performance mode and fan full speed). Each checks the maker and model and does nothing elsewhere.
+- **Deep core sleep (CC6)** and **Firmware power profile** (Power saving / Max performance) on AMD, as advanced CPU settings.
+- **AMD Fluid Motion Frames** and the **Intel Graphics power plan** (Max battery / Balanced / Max performance) on the GPU page, where the driver offers them.
+- **Hardware info** shows clocks and temperatures for each core.
+- **Session log** for testers: Settings → *Save a session log* (off by default) writes one CSV line per second while AutoTDP runs a game (FPS, 1% low, target, clocks, cores, EPP, power, TDP and what AutoTDP is trying), one file per game session in a `logs` folder. *Open logs folder* opens it.
+
+Changed
+- The AutoTDP simulation and the new logic tests run on every push, and a release is not published if they fail.
+
 Phawx ON 1.4
 
 New

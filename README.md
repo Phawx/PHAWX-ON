@@ -44,7 +44,10 @@ See [docs/FEATURES.md](docs/FEATURES.md) in the repository for the full feature 
   - Looks for the fewest cores Windows needs to keep unparked (per core type on hybrid CPUs), and for the highest EPP that still holds the frame rate.
   - Measures the power draw: the battery's discharge rate (the whole machine) on battery without a charger, the CPU package and a discrete GPU otherwise. Fewer cores or a higher EPP is kept only when the machine then draws less.
   - Target can be the refresh rate, half the refresh rate, or a custom value.
-- **Per-game profiles** (off by default). Save the current settings for the game in front. They load automatically whenever that game is in the foreground.
+- **Per-game profiles** (off by default). Save the current settings for the game in front, including whether AutoTDP is on. They load automatically whenever that game is in the foreground.
+- **Plugged in and on battery.** A setting can have its own value on battery. The switch at the top of the Quick page picks which set you are editing, and Phawx ON swaps them when you plug in or unplug.
+- **Hotkeys.** Ctrl+Alt+Up/Down step the TDP and Ctrl+Alt+Shift+Up/Down the GPU max clock, with a toast showing the new value.
+- **Session log** for testers (off by default): one CSV line per second while AutoTDP runs a game.
 - **Display.** Refresh rate and resolution.
 - **System.** Game Mode, Game Bar capture, GPU hardware scheduling, touch keyboard, Modern Standby override, and GPD Win Mini fan control.
 
@@ -85,10 +88,10 @@ To uninstall:
 
 | Input | Action |
 |---|---|
-| Gamepad | Press **Guide** (Xbox button). If Guide isn't available, press **Back + Start**. To use your own combo, go to Settings → *Open menu combo*, then hold the buttons you want. |
+| Gamepad | Press **Guide** (Xbox button, or PS on a DualSense or DualShock 4). If Guide isn't available, press **Back + Start**. On a ROG Ally the Armoury Crate and Command Center keys work too. To use your own combo, go to Settings → *Open menu combo*, then hold the buttons you want. |
 | Touch | Swipe left from the top-right edge of the screen. |
 | Tray icon | Click to toggle. Right-click for AutoTDP, Start with Windows and Exit. |
-| Keyboard | **Ctrl + Alt + P** |
+| Keyboard | **Ctrl + Alt + P** (and Ctrl + Alt + arrows to step TDP and GPU clock without opening it) |
 
 The overlay never takes focus from the game.
 
@@ -163,6 +166,8 @@ Per-game profiles are off until you turn on **Settings → Per-game profiles**, 
 2. Set it up as you like.
 3. Go to **Settings → Save profile for current game**. This also turns per-game profiles on.
 
+A profile also remembers whether AutoTDP is on, and its target. Settings with an on-battery value keep it per profile too.
+
 Phawx ON switches profiles when the game gains focus and switches back to your global settings when it loses focus. If you saved profiles with Phawx ON 1.0, profiles stay on after the update.
 
 ### Plugins
@@ -181,6 +186,12 @@ The zip includes the **RyzenAdj** plugin (`plugins\ryzenadj\`), off by default. 
 - Without *Read power table* (or on CPUs whose table cannot be read), the limits it sets are not read back or restored when Phawx ON exits.
 
 See the RyzenAdj section of the plugin guide for setup, the risks and how to remove InpOut.
+
+The zip also has two device plugins, both off by default and both new and not yet tried on the devices themselves:
+- **ROG Ally** (`plugins\rogally\`): the operating mode (Silent, Performance, Turbo) and the fan speeds, through ASUS's own driver that Armoury Crate installs.
+- **Legion Go** (`plugins\legiongo\`): the performance mode (Quiet, Balanced, Performance) and fan full speed, through Lenovo's WMI interface.
+
+Each one checks the maker and model and does nothing on any other machine.
 
 ## Build
 
