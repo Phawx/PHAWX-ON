@@ -6,6 +6,7 @@
 #define MSR_PKG_INFO      0x614
 #define MSR_TEMP_TARGET   0x1A2
 #define MSR_PKG_THERM     0x1B1
+#define MSR_THERM_STATUS  0x19C
 
 #define PL_LOCK           (1ull << 63)
 #define PL_PWR_MASK       0x7FFFull
@@ -197,6 +198,22 @@ static int read_power(int *mw)
     return ok ? 0 : -1;
 }
 
+/* Hardware info's per-core rows: APERF/MPERF clocks, IA32_THERM_STATUS below TjMax */
+static int core_read(int *mhz, int *celsius, int max)
+{
+    int n = ph_core_aperf(mhz, max), nc = g_plat.ncores > 0 ? g_plat.ncores : g_plat.nlogical;
+    if (nc > max) nc = max;
+    for (int k = 0; k < nc; k++) {
+        uint64_t v;
+        int cpu = ph_core_cpu(k);
+        if (n < 0) mhz[k] = -1;
+        celsius[k] = -1;
+        if (cpu >= 0 && !drv_rdmsr_cpu(MSR_THERM_STATUS, cpu, &v))
+            celsius[k] = (v & (1ull << 31)) ? tjmax - (int)((v >> 16) & 0x7F) : 0;
+    }
+    return nc;
+}
+
 static int get_power(ph_ctl *c, int32_t *out) { *out = pkg_mw; return pkg_mw < 0 ? -1 : 0; }
 static int get_temp(ph_ctl *c, int32_t *out) { *out = pkg_temp; return pkg_temp < 0 ? -1 : 0; }
 
@@ -239,6 +256,7 @@ static int intel_init(void)
     /* fan curves need the temperature even where the power limit cannot be read */
     int have_temp = !drv_rdmsr(MSR_PKG_THERM, &t);
     if (have_temp) ph_set_cpu_temp_reader(read_temp);
+    ph_set_core_reader(core_read);
     if (drv_rdmsr(MSR_RAPL_UNIT, &u) || drv_rdmsr(MSR_PKG_LIMIT, &lim)) return 0;
     pwr_unit = (int)(u & 0xF);
     energy_unit = (int)((u >> 8) & 0x1F);

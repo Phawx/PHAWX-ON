@@ -28,5 +28,6 @@ int      smu_pm_ok(void);
 int      smu_tctl(int *celsius);     /* Tctl from the SMN thermal register, without the PM table */
 int      smu_pm_refresh(void);
 int      smu_pm_get(int field, float *v);
+int      smu_pm_cores(float *ghz, float *celsius, int max);   /* per-core arrays of known tables: count, or -1 */
 
 #endif

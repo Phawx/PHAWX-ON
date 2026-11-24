@@ -317,6 +317,30 @@ static int read_power(int *mw)
     return 0;
 }
 
+/* Hardware info's per-core rows: the PM table's arrays where the table is known,
+   in the SMU's core order (cores it reports as 0 °C are absent and left out),
+   else APERF/MPERF clocks without temperatures */
+static uint32_t pm_cores;   /* the table's cores that are there, found on the first read */
+
+static int core_read(int *mhz, int *celsius, int max)
+{
+    float g[PH_MAX_CORES], t[PH_MAX_CORES];
+    int n = smu_pm_cores(g, t, PH_MAX_CORES);
+    if (n > 0) {
+        if (!pm_cores)
+            for (int i = 0; i < n; i++) if (t[i] > 1.0f && t[i] < 125.0f) pm_cores |= 1u << i;
+        int k = 0;
+        for (int i = 0; i < n && k < max; i++) {
+            if (!(pm_cores & (1u << i))) continue;
+            celsius[k] = t[i] > 1.0f && t[i] < 125.0f ? (int)(t[i] + 0.5f) : 0;
+            mhz[k] = g[i] > 0.05f && g[i] < 7.0f ? (int)(g[i] * 1000.0f + 0.5f) : 0;
+            k++;
+        }
+        if (k) return k;
+    }
+    return ph_core_aperf(mhz, max);
+}
+
 static int get_power(ph_ctl *c, int32_t *out) { *out = pwr_mw; return pwr_mw < 0 ? -1 : 0; }
 static int get_temp(ph_ctl *c, int32_t *out)  { *out = temp_c; return temp_c < 0 ? -1 : 0; }
 
@@ -454,6 +478,8 @@ static int amd_init(void)
     int t;
     if (read_temp(&t) == 0) ph_set_cpu_temp_reader(read_temp);
     if (smu_pm_ok()) ph_set_power_reader(PWR_PKG, read_power);
+    pm_cores = 0;
+    ph_set_core_reader(core_read);
     ph_register_ctls(ctls, C_N);
     return 0;
 }
