@@ -20,6 +20,8 @@ static volatile LONG cleaned, hw_restored;
 #define ID_EXIT   4
 #define ID_SAVEP  5
 #define HK_MENU   1
+#define HK_TDP_UP 2         /* ... HK_GPU_DN: the step hotkeys, in step_keys order */
+#define HK_GPU_DN 5
 
 enum { TM_SAVE = 10, TM_PROFILE = 11, TM_TRAY = 12, TM_FANS = 13 };
 #define WM_PH_DIRTY (WM_APP + 20)
@@ -235,6 +237,93 @@ static int set_profiles(ph_ctl *c, int32_t v)
     if (!v && cur_profile[0]) { app_save(); profile_switch(NULL); }
     return 0;
 }
+/* ---------- TDP and GPU clock step hotkeys ---------- */
+
+static const struct { UINT mod, vk; } step_keys[] = {
+    { MOD_CONTROL | MOD_ALT, VK_UP }, { MOD_CONTROL | MOD_ALT, VK_DOWN },
+    { MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_UP }, { MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_DOWN },
+};
+static int step_on = -1, step_taken;
+
+static void stepkeys_register(int on)
+{
+    on = on != 0;
+    if (!g_main || on == step_on) return;
+    step_on = on;
+    step_taken = 0;
+    for (int i = 0; i < PH_ARRAY(step_keys); i++) {
+        UnregisterHotKey(g_main, HK_TDP_UP + i);
+        if (on && !RegisterHotKey(g_main, HK_TDP_UP + i, step_keys[i].mod | MOD_NOREPEAT, step_keys[i].vk)) {
+            ph_log("hotkey %d is taken (%lu)", i, GetLastError());
+            step_taken++;
+        }
+    }
+}
+
+/* the sustained TDP: the built-in control, else the RyzenAdj plugin's */
+static ph_ctl *step_ctl(int gpu)
+{
+    static const char *const tdp[] = { "cpu.tdp", "ryzenadj.stapm" };
+    if (gpu) return ph_ctl_find("auto.gpumax");
+    for (int i = 0; i < PH_ARRAY(tdp); i++) {
+        ph_ctl *c = ph_ctl_find(tdp[i]);
+        if (c && !(c->flags & CF_HIDDEN) && c->set) return c;
+    }
+    return NULL;
+}
+
+/* one control step, applied to the value in force, shown in a toast */
+static void step_hotkey(int id)
+{
+    int gpu = id >= HK_TDP_UP + 2, dir = (id - HK_TDP_UP) % 2 ? -1 : 1;
+    ph_ctl *c = step_ctl(gpu);
+    if (!c || (c->flags & CF_HIDDEN) || !c->set) {
+        ui_toast(gpu ? L"No GPU clock control on this device" : L"No TDP control on this device");
+        return;
+    }
+    if (autotdp_owns(c)) {
+        ui_toast(gpu ? L"AutoTDP is managing the GPU clock" : L"AutoTDP is managing the TDP");
+        return;
+    }
+    int32_t cur = c->val, lo = c->min, hi = c->max;
+    if (gpu) {
+        /* 0 is "no cap": the domain's full speed */
+        ph_clk *d = ph_gpu_clk();
+        if (d && d->min_mhz > lo) lo = d->min_mhz;
+        if (!c->active || cur <= 0) cur = hi;
+    } else if (!c->active) {
+        int32_t hv;
+        cur = c->get && c->get(c, &hv) == 0 ? hv : c->def;
+    }
+    int32_t v = ph_ctl_step(c, cur, dir, lo, hi);
+    wchar_t b[48], m[96];
+    if (!c->active || v != c->val) {
+        if (ph_ctl_apply(c, v)) {
+            ph_swprintf(m, PH_ARRAY(m), L"Could not apply %s", c->label ? c->label : L"setting");
+            ui_toast(m);
+            return;
+        }
+        cfg_mark_dirty();
+        ui_refresh();
+    }
+    if (c->fmt) c->fmt(c, c->val, b, PH_ARRAY(b));
+    else ph_swprintf(b, PH_ARRAY(b), L"%d", (int)c->val);
+    ph_swprintf(m, PH_ARRAY(m), L"%s: %s%s", c->label ? c->label : L"", b,
+                c->val >= hi && dir > 0 ? L" (highest)" : c->val <= lo && dir < 0 ? L" (lowest)" : L"");
+    ui_toast(m);
+}
+
+static int set_stepkeys(ph_ctl *c, int32_t v) { (void)c; stepkeys_register(v); return 0; }
+static int sub_stepkeys(const ph_ctl *c, wchar_t *b, int n)
+{
+    if (step_on > 0 && step_taken) {
+        lstrcpynW(b, L"Some of these keys are taken by another app", n);
+        return TONE_BAD;
+    }
+    lstrcpynW(b, L"Ctrl+Alt+Up/Down for TDP, add Shift for the GPU clock", n);
+    return TONE_DIM;
+}
+
 static int set_autostart(ph_ctl *c, int32_t v) { (void)c; return app_autostart_set(v) == 0 ? 0 : -1; }
 static int get_autostart(ph_ctl *c, int32_t *o) { (void)c; *o = app_autostart_get(); return 0; }
 static int act_combo(ph_ctl *c, int32_t v) { (void)c; (void)v; input_capture_combo(); ui_toast(L"Hold the new button combo..."); return 0; }
@@ -288,6 +377,8 @@ static ph_ctl app_ctls[] = {
     { .key = "app.combo", .label = L"Open menu combo", .type = CT_ACTION, .page = PG_SETTINGS, .set = act_combo, .fmt = fmt_combo, .flags = CF_NOSAVE, .order = 1 },
     { .key = "app.autostart", .label = L"Start with Windows", .type = CT_TOGGLE, .page = PG_SETTINGS, .set = set_autostart, .get = get_autostart, .flags = CF_NOSAVE, .order = 2 },
     { .key = "app.advanced", .label = L"Show advanced options", .type = CT_TOGGLE, .page = PG_SETTINGS, .set = set_adv, .order = 3 },
+    { .key = "app.stepkeys", .label = L"TDP and GPU hotkeys", .type = CT_TOGGLE, .page = PG_SETTINGS, .def = 1,
+      .set = set_stepkeys, .sub = sub_stepkeys, .order = 5 },
     { .key = "app.uiscale", .label = L"UI scale", .type = CT_SLIDER, .page = PG_SETTINGS, .min = 75, .max = 200, .step = 5,
       .def = 100, .unit = L"%", .fmt = fmt_pct, .set = set_uiscale, .order = 4 },
     { .key = NULL, .label = L"Profiles", .type = CT_HEADER, .page = PG_SETTINGS, .order = 10 },
@@ -344,6 +435,7 @@ static void app_cleanup(void)
         KillTimer(m, TM_TRAY);
         KillTimer(m, TM_FANS);
         UnregisterHotKey(m, HK_MENU);
+        for (int i = HK_TDP_UP; i <= HK_GPU_DN; i++) UnregisterHotKey(m, i);
     }
     if (fg_hook) { UnhookWinEvent(fg_hook); fg_hook = NULL; }
     ui_show(0);
@@ -417,7 +509,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_PH_HOLD: ui_hold((int)w, (int)l); return 0;
     case WM_PH_REFRESH: ui_refresh(); app_tray_update(); return 0;
     case WM_PH_UPDATE: plugins_update((void *)w, (void *)l); return 0;
-    case WM_HOTKEY: if (w == HK_MENU) ui_toggle(); return 0;
+    case WM_HOTKEY:
+        if (w == HK_MENU) ui_toggle();
+        else if (w >= HK_TDP_UP && w <= HK_GPU_DN) step_hotkey((int)w);
+        return 0;
     case WM_INPUT: input_on_rawinput(h, l); return DefWindowProcW(h, m, w, l);
     case WM_INPUT_DEVICE_CHANGE: input_on_devchange(); return 0;
     case WM_PH_DIRTY: SetTimer(h, TM_SAVE, 2000, NULL); return 0;
@@ -548,6 +643,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
     input_init(g_main);
     tray_add();
     RegisterHotKey(g_main, HK_MENU, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'P');
+    ph_ctl *sk = ph_ctl_find("app.stepkeys");
+    stepkeys_register(sk ? sk->val : 1);
     fg_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, NULL, fg_proc, 0, 0,
                               WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 

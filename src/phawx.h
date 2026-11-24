@@ -127,6 +127,7 @@ ph_ctl  *ph_ctl_at(int i);
 ph_ctl  *ph_ctl_find(const char *key);
 int      ph_ctl_apply(ph_ctl *c, int32_t v);
 void     ph_ctl_reset(ph_ctl *c);
+int32_t  ph_ctl_step(const ph_ctl *c, int32_t cur, int dir, int32_t lo, int32_t hi);  /* one step, on the grid */
 void     ph_apply_all(int reapply_only);
 ph_clk  *ph_cpu_clk(void);
 ph_clk  *ph_gpu_clk(void);

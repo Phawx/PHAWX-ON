@@ -112,6 +112,17 @@ void ph_ctl_reset(ph_ctl *c)
     }
 }
 
+/* one step up or down from cur within lo..hi; a value between steps (a hardware
+   reading) first goes onto the step grid, so it never moves more than one step */
+int32_t ph_ctl_step(const ph_ctl *c, int32_t cur, int dir, int32_t lo, int32_t hi)
+{
+    int32_t st = c->step > 0 ? c->step : 1, off = (cur - c->min) % st;
+    if (off < 0) off += st;
+    int32_t v = cur - off;
+    if (dir > 0 || v == cur) v += (dir > 0 ? 1 : -1) * st;
+    return PH_CLAMP(v, lo, hi);
+}
+
 void ph_apply_all(int reapply_only)
 {
     for (int i = 0; i < nctls; i++) {

@@ -350,9 +350,29 @@ static void test_dc(void)
     CHECK(!sec_find(L"dc", 0));
 }
 
+/* ---------- hotkey steps ---------- */
+
+static void test_step(void)
+{
+    printf("hotkey steps\n");
+    ph_ctl c = { .min = 3000, .max = 30000, .step = 1000 };
+    CHECK(ph_ctl_step(&c, 15000, 1, 3000, 30000) == 16000);
+    CHECK(ph_ctl_step(&c, 15000, -1, 3000, 30000) == 14000);
+    CHECK(ph_ctl_step(&c, 15400, 1, 3000, 30000) == 16000);    /* a reading between steps */
+    CHECK(ph_ctl_step(&c, 15400, -1, 3000, 30000) == 15000);
+    CHECK(ph_ctl_step(&c, 30000, 1, 3000, 30000) == 30000);
+    CHECK(ph_ctl_step(&c, 3000, -1, 3000, 30000) == 3000);
+    CHECK(ph_ctl_step(&c, 2500, -1, 3000, 30000) == 3000);
+    ph_ctl g = { .min = 0, .max = 2000, .step = 50 };
+    CHECK(ph_ctl_step(&g, 2000, -1, 300, 2000) == 1950);       /* no cap: from full speed */
+    CHECK(ph_ctl_step(&g, 300, -1, 300, 2000) == 300);
+    CHECK(ph_ctl_step(&g, 1975, 1, 300, 2000) == 2000);
+}
+
 int main(void)
 {
     test_dc();
+    test_step();
     printf("%d checks, %d failed\n", checks, fails);
     return fails != 0;
 }
