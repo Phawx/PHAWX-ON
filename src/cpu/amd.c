@@ -7,6 +7,8 @@
 #define MSR_CPPC_CAP1 0xC00102B0
 #define MSR_CPPC_EN   0xC00102B1
 #define MSR_CPPC_REQ  0xC00102B3
+#define MSR_CSTATE    0xC0010296    /* CSTATE_CONFIG: CCR0..2_CC6EN, as ZenStates sets and clears them */
+#define CC6_BITS      ((1ull << 22) | (1ull << 14) | (1ull << 6))
 
 #define HWF (CF_OPTIONAL | CF_REAPPLY)
 #define GFX_LO 200
@@ -18,6 +20,8 @@ static int32_t pwr_mw = -1, temp_c = -1;
 static int gfx_hi = 1600;
 
 static int cpb_orig = -1, cpb_wrote;
+static uint64_t cc6_orig;
+static int cc6_wrote;
 
 typedef struct { uint8_t lo, hi, omin, omax, saved; } cppc_core;
 static cppc_core *cores;
@@ -28,7 +32,7 @@ static int ccs_ready;
 
 enum {
     C_TDP, C_BOOST, C_HDR, C_PWR, C_TEMP, C_TCTL, C_SLOW, C_APUSLOW, C_STAPMT, C_SLOWT,
-    C_CLKHDR, C_CPB, C_GHDR, C_GMIN, C_GMAX, C_N
+    C_SMUMODE, C_CLKHDR, C_CPB, C_CC6, C_GHDR, C_GMIN, C_GMAX, C_N
 };
 static ph_ctl ctls[C_N];
 
@@ -120,6 +124,54 @@ static int set_cpb(ph_ctl *c, int32_t on)
     cpb_wrote = 1;
     return 0;
 }
+
+/* core C6 on every core; restored from core 0's original bits */
+static int get_cc6(ph_ctl *c, int32_t *out)
+{
+    uint64_t v;
+    if (drv_rdmsr(MSR_CSTATE, &v)) return -1;
+    *out = (v & CC6_BITS) == CC6_BITS;
+    return 0;
+}
+
+static int set_cc6(ph_ctl *c, int32_t on)
+{
+    if (drv_rmw_all(MSR_CSTATE, CC6_BITS, on ? CC6_BITS : 0)) return -1;
+    cc6_wrote = 1;
+    return 0;
+}
+
+static void cc6_restore(void)
+{
+    if (cc6_wrote && drv_rmw_all(MSR_CSTATE, CC6_BITS, cc6_orig) == 0) cc6_wrote = 0;
+}
+
+static void release_cc6(ph_ctl *c) { cc6_restore(); }
+
+static int sub_cc6(const ph_ctl *c, wchar_t *b, int n)
+{
+    lstrcpynW(b, L"On: lower idle power. Off: less latency, more idle power", n);
+    return TONE_DIM;
+}
+
+/* the firmware's power-saving or max-performance profile (SMU) */
+static const wchar_t *const smumode_ch[] = { L"Power saving", L"Max performance", NULL };
+
+static int set_smumode(ph_ctl *c, int32_t v)
+{
+    return fail(c, smu_apply(v ? S_MAX_PERF : S_POWER_SAVING, 0));
+}
+
+/* nothing reads the profile back: Default goes to the one ALIB picks for the power source */
+static void smumode_restore(void)
+{
+    uint32_t m = (1u << S_MAX_PERF) | (1u << S_POWER_SAVING);
+    if (!(wrote & m)) return;
+    smu_set(platform_on_ac() ? S_MAX_PERF : S_POWER_SAVING, 0);
+    wrote &= ~m;
+}
+
+static void release_smumode(ph_ctl *c) { smumode_restore(); }
 
 static int perf_of(int mhz) { return (mhz * nom_perf + nom_mhz / 2) / nom_mhz; }
 static int mhz_of(int perf) { return perf * nom_mhz / nom_perf; }
@@ -295,9 +347,15 @@ static ph_ctl ctls[C_N] = {
     [C_SLOWT] = { .key = "cpu.slowtime", .label = L"Slow time", .type = CT_SLIDER, .page = PG_CPU,
       .flags = HWF | CF_ADVANCED, .min = 1, .max = 60, .step = 1, .def = 5, .unit = L"s",
       .set = set_smu, .fmt = fmt_s, .arg = S_SLOW_TIME, .order = 107 },
+    [C_SMUMODE] = { .key = "cpu.smumode", .label = L"Firmware power profile", .type = CT_CHOICE, .page = PG_CPU,
+      .flags = HWF | CF_ADVANCED, .choices = smumode_ch, .max = 1, .def = 1, .set = set_smumode,
+      .release = release_smumode, .order = 108 },
     [C_CLKHDR] = { .label = L"CPU clocks", .type = CT_HEADER, .page = PG_CPU, .order = 110 },
     [C_CPB] = { .key = "cpu.cpb", .label = L"Core Performance Boost", .type = CT_TOGGLE, .page = PG_CPU,
       .flags = HWF, .def = 1, .get = get_cpb, .set = set_cpb, .fmt = fmt_onoff, .order = 111 },
+    [C_CC6] = { .key = "cpu.cc6", .label = L"Deep core sleep (CC6)", .type = CT_TOGGLE, .page = PG_CPU,
+      .flags = HWF | CF_ADVANCED, .max = 1, .def = 1, .get = get_cc6, .set = set_cc6, .fmt = fmt_onoff,
+      .sub = sub_cc6, .release = release_cc6, .order = 112 },
     [C_GHDR] = { .label = L"Integrated GPU (SMU)", .type = CT_HEADER, .page = PG_GPU, .order = 300 },
     [C_GMIN] = { .key = "gpu.igpumin", .label = L"iGPU min clock", .type = CT_SLIDER, .page = PG_GPU,
       .flags = HWF | CF_PROFILE, .min = GFX_LO, .step = 50, .def = GFX_LO, .unit = L"MHz",
@@ -339,6 +397,8 @@ static void limits_init(void)
     if (!smu_has(S_TCTL_TEMP)) hide(C_TCTL);
     if (!smu_has(S_STAPM_TIME)) hide(C_STAPMT);
     if (!smu_has(S_SLOW_TIME)) hide(C_SLOWT);
+    if (!smu_has(S_MAX_PERF) || !smu_has(S_POWER_SAVING)) hide(C_SMUMODE);
+    else ctls[C_SMUMODE].def = platform_on_ac() ? 1 : 0;
     int t;
     if (!smu_pm_ok()) hide(C_PWR);
     if (read_temp(&t)) hide(C_TEMP);
@@ -363,6 +423,17 @@ static void cpb_init(void)
     ctls[C_CPB].def = cpb_orig;
 }
 
+static void cc6_init(void)
+{
+    uint64_t v;
+    if (drv_rdmsr_cpu(MSR_CSTATE, 0, &v) || drv_wrmsr_cpu(MSR_CSTATE, 0, v)) {
+        hide(C_CC6);
+        return;
+    }
+    cc6_orig = v & CC6_BITS;
+    ctls[C_CC6].def = cc6_orig == CC6_BITS;
+}
+
 static int amd_probe(void) { return g_plat.vendor == VENDOR_AMD; }
 
 static int amd_init(void)
@@ -370,13 +441,15 @@ static int amd_init(void)
     for (int i = 0; i < S_COUNT; i++) orig[i] = -1;
     wrote = 0;
     cpb_wrote = 0;
+    cc6_wrote = 0;
     fam = smu_detect();
     if (!drv_ok()) return 0;
     if (fam != AF_UNKNOWN) smu_init();
     limits_init();
     cpb_init();
+    cc6_init();
     cppc_init();
-    if (ctls[C_CPB].flags & CF_HIDDEN) hide(C_CLKHDR);
+    if ((ctls[C_CPB].flags & CF_HIDDEN) && (ctls[C_CC6].flags & CF_HIDDEN)) hide(C_CLKHDR);
     sample();
     int t;
     if (read_temp(&t) == 0) ph_set_cpu_temp_reader(read_temp);
@@ -394,10 +467,12 @@ static void amd_shutdown(void)
     }
     if (wrote & (1u << S_MAX_GFXCLK)) smu_set(S_MAX_GFXCLK, (uint32_t)gfx_hi);
     if (wrote & (1u << S_MIN_GFXCLK)) smu_set(S_MIN_GFXCLK, GFX_LO);
+    smumode_restore();
     wrote = 0;
     if (cores) cppc_apply(-1);
     if (cpb_wrote && cpb_orig >= 0) drv_rmw_all(MSR_HWCR, HWCR_CPBDIS, cpb_orig ? 0 : HWCR_CPBDIS);
     cpb_wrote = 0;
+    cc6_restore();
 }
 
 static void amd_resume(void)

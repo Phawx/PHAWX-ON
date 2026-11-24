@@ -74,8 +74,8 @@ Control keys (such as `cpu.tdp`) are the names used in `phawx.ini`.
 | Intel Graphics power plan (powercfg 44f3beca) | No | Could be added to `src/sys/winpower.c`. |
 | Intel DPTF device disable | Not planned | Removes a thermal safety layer. |
 | iGPU VRAM (DedicatedSegmentSize) | Not planned | Registry change that needs a driver restart. |
-| AMD `--max-performance` / `--power-saving` | No | Could be added to `src/cpu/smu.c` / `src/cpu/amd.c`. |
-| AMD core CC6 (0xC0010296) | No | AMDFamily17 allows writes to this MSR. Could be added to `src/cpu/amd.c`. |
+| AMD `--max-performance` / `--power-saving` | Yes | `src/cpu/amd.c` (`cpu.smumode`, "Firmware power profile", advanced), `src/cpu/smu.c`. MP1 0x11 / 0x12 (Raven class 0x18 / 0x19), argument 0, Renoir and later APUs; not on Dragon or Fire Range. The firmware cannot report which one is active, so Default and exit send the one ALIB uses for the power source (AC: max performance, battery: power saving), and only if Phawx ON sent one. |
+| AMD core CC6 (0xC0010296) | Yes | `src/cpu/amd.c` (`cpu.cc6`, "Deep core sleep (CC6)", advanced). Clears or sets CCR0..2_CC6EN (bits 6, 14, 22) on every core through AMDFamily17. Hidden when the MSR cannot be read and written back. Default and exit put back core 0's original bits. Package C6 (0xC0010292) is left alone. |
 | Steam Deck GFX VRM current | No | Van Gogh only. Could be added as an SMU message. |
 | Windows boost mode (PERFBOOSTMODE) | Yes | `src/sys/winpower.c` (`power.boost`) |
 | PROCFREQMAX / PROCFREQMAX1 caps | Yes | `src/sys/winpower.c` |

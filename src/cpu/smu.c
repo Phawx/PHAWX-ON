@@ -62,6 +62,9 @@ static const smu_cmd cmds[] = {
     {S_APU_SLOW_LIMIT, MB_MP1,  0x21, G_RN}, {S_APU_SLOW_LIMIT, MB_MP1, 0x23, G_RMB | G_PHX | G_STX},
     {S_MAX_GFXCLK,     MB_MP1,  0x46, G_RV | B(AF_LUCIENNE)},
     {S_MIN_GFXCLK,     MB_MP1,  0x47, G_RV | B(AF_LUCIENNE)},
+    /* the SMU side of ALIB's DC / AC profile hints, argument 0 (RyzenAdj); not on Dragon/Fire Range */
+    {S_POWER_SAVING,   MB_MP1,  0x19, G_RV}, {S_POWER_SAVING, MB_MP1, 0x12, G_MOB},
+    {S_MAX_PERF,       MB_MP1,  0x18, G_RV}, {S_MAX_PERF, MB_MP1, 0x11, G_MOB},
 };
 
 static int fam = AF_UNKNOWN;
