@@ -90,6 +90,19 @@ static int ui_scale = 100;              /* Settings -> UI scale, % */
 static int cpt = 3;
 static ph_ctl *cedit;
 
+/* Quick page: which set of values the rows show and change, plugged in or on
+   battery; it follows the power source each time the menu opens */
+static const wchar_t *const for_ch[] = { L"Plugged in", L"On battery", NULL };
+static int for_on, for_ac = -1;
+static int set_for(ph_ctl *c, int32_t v) { (void)c; (void)v; return 0; }
+static int for_sub(const ph_ctl *c, wchar_t *b, int n)
+{
+    lstrcpynW(b, c->val == !g_plat.on_ac ? L"In use now" : c->val ? L"Used when on battery" : L"Used when plugged in", n);
+    return TONE_DIM;
+}
+static ph_ctl for_row = { .label = L"Settings for", .type = CT_CHOICE, .page = PG_QUICK, .order = 0,
+                          .flags = CF_NOSAVE | CF_NOPIN, .choices = for_ch, .set = set_for, .sub = for_sub, .active = 1 };
+
 static int S(int v) { return MulDiv(v, dpi, 96); }
 static int scaled_dpi(HMONITOR m);
 static int on_ui(void) { return GetCurrentThreadId() == ui_tid; }
@@ -203,6 +216,14 @@ static int row_visible(const ph_ctl *c)
 static int selectable(const ph_ctl *c) { return c->type != CT_HEADER && c->type != CT_INFO && c->type != CT_STATUS; }
 static int locked(const ph_ctl *c) { return c->type != CT_INFO && autotdp_owns(c); }
 
+/* the set being edited (1 = on battery), and what a row has in it */
+static int eset(void) { return for_on && !(for_row.flags & CF_HIDDEN) ? for_row.val != 0 : cfg_dc_in(); }
+static int bat_view(const ph_ctl *c) { return eset() && cfg_dc_able(c); }
+static int vget(const ph_ctl *c, int32_t *v) { return cfg_dc_get(c, eset(), v); }
+static int vact(const ph_ctl *c) { int32_t v; return vget(c, &v); }
+/* the row shows the value in force (so the hardware reading is its own) */
+static int in_force(const ph_ctl *c) { return !cfg_dc_able(c) || !c->dc || eset() == cfg_dc_in(); }
+
 /* a persisted setting a long press resets; rows without a key (plugin switches,
    links) have nothing to reset */
 static int has_default(const ph_ctl *c) { return c->key || c->type == CT_CURVE; }
@@ -213,7 +234,7 @@ static int holdable(const ph_ctl *c)
 }
 
 /* ... and it is away from Default */
-static int resettable(const ph_ctl *c) { return holdable(c) && c->active; }
+static int resettable(const ph_ctl *c) { return holdable(c) && (bat_view(c) ? c->dc : vact(c)); }
 
 static int is_section(const ph_ctl *c) { return c->type == CT_HEADER && (c->flags & CF_SECTION); }
 static int is_table(const ph_ctl *c) { return c->type == CT_INFO && (c->flags & CF_TABLE); }
@@ -273,7 +294,8 @@ static void where_from(const ph_ctl *c, wchar_t *b, int n)
 static int32_t base_val(int i)
 {
     ph_ctl *c = rows[i];
-    return c->active ? c->val : hwok[i] ? hwv[i] : c->def;
+    int32_t v;
+    return vget(c, &v) ? v : hwok[i] && in_force(c) ? hwv[i] : c->def;
 }
 
 static void fmt_val(const ph_ctl *c, int32_t v, wchar_t *b, int n)
@@ -357,6 +379,7 @@ static int first_sel(int from, int dir)
 static void rebuild(void)
 {
     ph_ctl *keep = (sel >= 0 && sel < nrows) ? rows[sel] : NULL;
+    if (for_ac != g_plat.on_ac) { for_ac = g_plat.on_ac; for_row.val = !g_plat.on_ac; }
     memset(ease_ok, 0, sizeof ease_ok);
     ntabs = 0;
     for (int pg = 0; pg < PG_COUNT; pg++)
@@ -408,7 +431,7 @@ static void apply_val(ph_ctl *c, int32_t v, int confirmed)
         return;
     }
     int seq = toast_seq;
-    int r = ph_ctl_apply(c, v);
+    int r = cfg_dc_edit(c, eset(), v);
     if (r) {
         if (seq == toast_seq && c->type != CT_ACTION) {
             wchar_t m[96];
@@ -430,7 +453,8 @@ static void commit_pending(void)
     ph_ctl *c = pend;
     int32_t v = pend_v;
     pend = NULL;
-    if (!c->active || c->val != v) apply_val(c, v, 0);
+    int32_t cv;
+    if (!vget(c, &cv) || cv != v) apply_val(c, v, 0);
     inval();
 }
 
@@ -443,7 +467,7 @@ static void set_pending(ph_ctl *c, int32_t v, int from_drag)
     if ((c->flags & CF_LIVE) && !(c->flags & CF_DANGER)) {
         if (!from_drag || ph_ms() - last_live >= 60) {
             last_live = ph_ms();
-            if (ph_ctl_apply(c, v) == 0) cfg_mark_dirty();
+            if (cfg_dc_edit(c, eset(), v) == 0) cfg_mark_dirty();
         }
     }
     if (!from_drag) SetTimer(hw, TM_COMMIT, 450, NULL);
@@ -456,11 +480,13 @@ static void reset_sel(void)
     ph_ctl *c = rows[sel];
     if (!has_default(c) || !selectable(c) || c->type == CT_ACTION || locked(c)) return;
     if (pend == c) { pend = NULL; KillTimer(hw, TM_COMMIT); }
-    if (!c->active) return;
-    ph_ctl_reset(c);
+    int bat = bat_view(c);
+    if (bat ? !c->dc : !vact(c)) return;
+    cfg_dc_clear(c, eset());
     cfg_mark_dirty();
     wchar_t m[96];
-    ph_swprintf(m, PH_ARRAY(m), L"%s set to Default", c->label ? c->label : L"Setting");
+    ph_swprintf(m, PH_ARRAY(m), bat ? L"%s on battery: same as plugged in" : L"%s set to Default",
+                c->label ? c->label : L"Setting");
     ui_toast(m);
     rebuild();
     inval();
@@ -513,7 +539,7 @@ static void hold_tick(void)
     if (ptr) held = 1;    /* the finger or button coming up is not a tap */
     /* a long press also starts on rows at Default, like X or R it then only says so */
     if (resettable(c)) reset_sel();
-    else ui_toast(locked(c) ? L"Managed by AutoTDP" : L"Already at Default");
+    else ui_toast(locked(c) ? L"Managed by AutoTDP" : bat_view(c) ? L"Already the same as plugged in" : L"Already at Default");
 }
 
 /* 0..1000 while the selected row is being held towards Default */
@@ -534,7 +560,8 @@ void ui_hold(int src, int down)
     if (!c) return;
     if (!resettable(c)) {
         if (locked(c)) ui_toast(L"Managed by AutoTDP");
-        else if (has_default(c) && c->type != CT_ACTION && !c->active) ui_toast(L"Already at Default");
+        else if (bat_view(c) && c->type != CT_ACTION) ui_toast(L"Already the same as plugged in");
+        else if (has_default(c) && c->type != CT_ACTION && !vact(c)) ui_toast(L"Already at Default");
         return;
     }
     hold_start(src, HOLD_MS);
@@ -565,7 +592,9 @@ static void toggle_autotdp(void)
     ph_ctl *c = ph_ctl_find("auto.on");
     int want = !autotdp_running();
     if (c && !(c->flags & CF_HIDDEN) && c->type == CT_TOGGLE) {
-        apply_val(c, want, 1);
+        /* the value in force, whichever set the menu shows */
+        if (ph_ctl_apply(c, want) == 0) cfg_mark_dirty();
+        app_tray_update();
     } else {
         if (want) autotdp_start(); else autotdp_stop();
         app_tray_update();
@@ -638,7 +667,8 @@ static void adjust(int d)
         break;
     case CT_TOGGLE:
         v = d > 0 ? 1 : 0;
-        if (c->active && c->val == v) return;
+        int32_t cv;
+        if (vget(c, &cv) && cv == v) return;
         apply_val(c, v, 0);
         break;
     case CT_CHOICE:
@@ -834,8 +864,8 @@ static COLORREF value_text(int i, wchar_t *b, int n)
     if (pend == c) { fmt_val(c, pend_v, b, n); return C_TEXT; }
     if (c->type == CT_INFO) { fmt_val(c, hwok[i] ? hwv[i] : c->val, b, n); return C_TEXT; }
     if (c->type == CT_ACTION) { if (c->fmt) c->fmt(c, c->val, b, n); return C_DIM; }
-    if ((c->flags & CF_OPTIONAL) && !c->active) {
-        if (hwok[i]) {
+    if ((c->flags & CF_OPTIONAL) && !vact(c)) {
+        if (hwok[i] && in_force(c)) {
             wchar_t t[64];
             fmt_val(c, hwv[i], t, PH_ARRAY(t));
             ph_swprintf(b, n, L"Default (%s)", t);
@@ -845,7 +875,8 @@ static COLORREF value_text(int i, wchar_t *b, int n)
         return C_DIM;
     }
     fmt_val(c, base_val(i), b, n);
-    return C_ACC;
+    /* on battery with no value of its own: the plugged-in one */
+    return bat_view(c) && !c->dc ? C_DIM : C_ACC;
 }
 
 /* the slider track; drawing and dragging must agree on it */
@@ -890,6 +921,30 @@ static void draw_cross(HDC m, int cx, int cy, COLORREF col)
     LineTo(m, cx - r - 1, cy + r + 1);
     SelectObject(m, o);
     DeleteObject(p);
+}
+
+/* a row with a value of its own on battery: a small battery after its label */
+static void draw_batt(HDC m, int x, int cy, COLORREF col)
+{
+    int w = S(13), h = S(7), t = S(1) > 0 ? S(1) : 1;
+    int y = cy - h / 2;
+    fill(m, x, y, x + w, y + t, col);
+    fill(m, x, y + h - t, x + w, y + h, col);
+    fill(m, x, y, x + t, y + h, col);
+    fill(m, x + w - t, y, x + w, y + h, col);
+    fill(m, x + w, y + h / 4, x + w + S(2), y + h - h / 4, col);
+    fill(m, x + 2 * t, y + 2 * t, x + w / 2, y + h - 2 * t, col);
+}
+
+/* the label, and the battery mark when the row has a battery value */
+static void draw_label(HDC m, HFONT f, COLORREF lc, const ph_ctl *c, int x0, int lt, int r, int lb)
+{
+    if (!c->dc || !cfg_dc_able(c)) { text(m, f, lc, c->label, x0, lt, r, lb, DT_LEFT); return; }
+    int mw = S(22);
+    text(m, f, lc, c->label, x0, lt, r - mw, lb, DT_LEFT);
+    int lx = x0 + text_w(m, f, c->label ? c->label : L"") + S(6);
+    if (lx > r - mw + S(6)) lx = r - mw + S(6);
+    if (lx + S(15) <= r) draw_batt(m, lx, (lt + lb) / 2, eset() ? C_ACC : C_DIM);
 }
 
 static COLORREF tone_color(int t) { return t == TONE_GOOD ? C_ACC : t == TONE_BAD ? C_DANGER : C_DIM; }
@@ -1047,7 +1102,7 @@ static void draw_row(HDC m, int i, int y)
         int vx = x1 - vw;
         if (vx < x0 + (x1 - x0) / 3) vx = x0 + (x1 - x0) / 3;
         row_vx[i] = vx;
-        text(m, f_body, lc, c->label, x0, lt, vx - S(8), lb, DT_LEFT);
+        draw_label(m, f_body, lc, c, x0, lt, vx - S(8), lb);
         text(m, f_body, vc, v, vx, lt, x1, lb, DT_RIGHT);
         if (two) text(m, f_small, tone_color(tone), sub, x0, st, x1, sb, DT_LEFT);
         int32_t cv = pend == c ? pend_v : base_val(i), lv;
@@ -1069,7 +1124,7 @@ static void draw_row(HDC m, int i, int y)
         track_x(&kx0, &kx1);
         int kx = range > 0 ? kx0 + (int)((fv - (float)c->min) * (float)(kx1 - kx0) / (float)range) : kx0;
         kx = PH_CLAMP(kx, kx0, kx1);
-        int on = (c->active || pend == c) && !lk;
+        int on = (vact(c) || pend == c) && !lk;
         COLORREF fillc = live == 2 ? C_TRY : live ? C_ACC : on ? C_ACC : C_FAINT;
         rrect(m, kx0, ty - S(2), kx1, ty + S(2), S(4), C_TRACK);
         rrect(m, kx0, ty - S(2), kx, ty + S(2), S(4), fillc);
@@ -1078,7 +1133,7 @@ static void draw_row(HDC m, int i, int y)
     }
     case CT_TOGGLE: {
         int sw = S(44), sh = S(24), sx = x1 - sw, sy = y + (h - sh) / 2;
-        int optdef = (c->flags & CF_OPTIONAL) && !c->active && pend != c;
+        int optdef = (c->flags & CF_OPTIONAL) && !vact(c) && pend != c;
         int on = base_val(i) != 0;
         int lx = sx - S(8);
         if (optdef || lk) {
@@ -1088,7 +1143,7 @@ static void draw_row(HDC m, int i, int y)
             lx -= dw + S(8);
         }
         row_vx[i] = sx;
-        text(m, f_body, lc, c->label, x0, lt, lx, lb, DT_LEFT);
+        draw_label(m, f_body, lc, c, x0, lt, lx, lb);
         if (two) text(m, f_small, tone_color(tone), sub, x0, st, lx, sb, DT_LEFT);
         COLORREF tc = on ? ((optdef || lk) ? C_FAINT : C_ACC) : C_TRACK;
         rrect(m, sx, sy, sx + sw, sy + sh, sh, tc);
@@ -1102,7 +1157,7 @@ static void draw_row(HDC m, int i, int y)
         int vx = x1 - total;
         if (vx < x0 + (x1 - x0) / 3) vx = x0 + (x1 - x0) / 3;
         row_vx[i] = vx;
-        text(m, f_body, lc, c->label, x0, lt, vx - S(8), lb, DT_LEFT);
+        draw_label(m, f_body, lc, c, x0, lt, vx - S(8), lb);
         if (two) text(m, f_small, tone_color(tone), sub, x0, st, vx - S(8), sb, DT_LEFT);
         COLORREF ac = lk ? C_FAINT : C_DIM;
         text(m, f_body, ac, L"\x2039", vx, y, vx + aw, y + h, DT_LEFT);
@@ -1358,6 +1413,7 @@ void ui_show(int show)
         page = PG_QUICK;
         sel = -1;
         scroll = 0;
+        for_ac = -1;
         place();
         rebuild();
         if (sel >= 0) ensure_visible(sel);
@@ -1879,4 +1935,11 @@ void ui_init(HINSTANCE hi)
     }
     toast_hw = CreateWindowExW(ex, L"PhawxON.toast", PH_APPNAME_W, WS_POPUP, 0, 0, 1, 1, NULL, NULL, hi, NULL);
     lstrcpynW(live, L"", PH_ARRAY(live));
+    /* the plugged in / on battery switch, on machines with a battery */
+    SYSTEM_POWER_STATUS ps;
+    if (!GetSystemPowerStatus(&ps) || ps.BatteryFlag != 128) {
+        for_row.val = !g_plat.on_ac;
+        ph_register_ctl(&for_row);
+        for_on = 1;
+    }
 }

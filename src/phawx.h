@@ -79,6 +79,12 @@ struct ph_ctl {
     int16_t            order;     /* sort key within page, lower first */
     ph_sub_fn          sub;       /* optional status line under the label */
     void             (*release)(ph_ctl *c);  /* optional, CF_OPTIONAL: it went back to Default */
+    /* on-battery value (config.c): val/active are always the value in force, the
+       other power source's waits here */
+    uint8_t            dc;        /* has a value of its own on battery */
+    uint8_t            ac_active; /* while the battery value is in force: the plugged-in one */
+    int32_t            ac_val;
+    int32_t            dc_val;    /* while plugged in: the battery value */
 };
 
 /* ---------- clock domains used by AutoTDP ---------- */
@@ -121,6 +127,8 @@ ph_ctl  *ph_ctl_at(int i);
 ph_ctl  *ph_ctl_find(const char *key);
 int      ph_ctl_apply(ph_ctl *c, int32_t v);
 void     ph_ctl_reset(ph_ctl *c);
+int32_t  ph_ctl_step(const ph_ctl *c, int32_t cur, int dir, int32_t lo, int32_t hi);  /* one step, on the grid */
+ph_ctl  *ph_tdp_ctl(void);           /* the sustained TDP: the built-in cpu.tdp, else the RyzenAdj plugin's */
 void     ph_apply_all(int reapply_only);
 ph_clk  *ph_cpu_clk(void);
 ph_clk  *ph_gpu_clk(void);
@@ -278,6 +286,25 @@ void autotdp_cfg_loaded(void);                   /* after cfg_load: find the sav
 int  autotdp_owns(const ph_ctl *c);              /* AutoTDP holds this setting now (locked in the UI) */
 int  autotdp_live(const ph_ctl *c, int32_t *out); /* the value it holds it at: 1, 2 = trying it now; 0 = none */
 
+/* ---------- session log for testers (sessionlog.c) ---------- */
+typedef struct ph_slog_row {
+    const wchar_t *exe;
+    float fps, low1;
+    int   target, cpu_mhz, gpu_mhz;
+    int   cores_on, cores_max, epp;     /* -1 = unknown / not managed */
+    int   power_mw, power_src;          /* -1 = no reading; PSRC_* */
+    int   tdp_mw;                       /* -1 = Default */
+    const char *trying;                 /* "" = nothing */
+    int   bottleneck;                   /* 0 none, 1 CPU, 2 GPU */
+} ph_slog_row;
+extern volatile LONG g_slog;            /* "Save a session log" is on */
+void slog_row(uint64_t now, const ph_slog_row *r);  /* the AutoTDP worker, once a second with a game */
+void slog_close(void);                  /* flush and close; the worker, or after it stopped */
+int  slog_dir(wchar_t *out, int n);     /* the logs folder, created; -1 if none can be written */
+int  slog_head(char *b, int n);
+int  slog_text(char *b, int n, const ph_slog_row *r, const char *clock, unsigned secs);  /* one CSV line, 0 if it does not fit */
+void slog_name(wchar_t *b, int n, int y, int mo, int d, int h, int mi, int s, const wchar_t *exe);
+
 /* ---------- config (config.c) ---------- */
 void cfg_load(void);
 void cfg_save(void);
@@ -290,9 +317,20 @@ const wchar_t *cfg_file(void);
 void cfg_load_profile(const wchar_t *exe);  /* NULL = global */
 void cfg_save_profile(const wchar_t *exe);
 int  cfg_has_profile(const wchar_t *exe);
+void cfg_del_profile(const wchar_t *exe);  /* with its battery values */
 int  cfg_any_profile(void);                 /* any [game:*] section saved */
 const wchar_t *cfg_dir(void);
 void cfg_mark_dirty(void);
+/* on-battery values: a CF_PROFILE control may keep one of its own, saved as [dc]
+   (or [dc:game:x.exe]) under the same key; none means the same as plugged in.
+   set 0 = plugged in, 1 = on battery. */
+int  cfg_dc_able(const ph_ctl *c);                 /* can have an on-battery value */
+int  cfg_dc_in(void);                              /* the battery values are in force */
+int  cfg_dc_get(const ph_ctl *c, int set, int32_t *v);  /* that set's value; returns its active */
+int  cfg_dc_edit(ph_ctl *c, int set, int32_t v);   /* change one set; applied only if it is in force */
+void cfg_dc_clear(ph_ctl *c, int set);             /* hold-to-reset: battery = same as plugged in */
+void cfg_dc_use(int dc);                           /* put one set in force, hardware untouched */
+void cfg_dc_power(int dc);                         /* the power source changed: swap, reset what went to Default */
 
 /* ---------- input (input.c) ---------- */
 /* IN_RESET resets at once (Delete key); the pad's X and keyboard R reset only when

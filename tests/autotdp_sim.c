@@ -79,6 +79,22 @@ ph_ctl *ph_ctl_at(int i) { (void)i; return NULL; }
 int ph_ctl_apply(ph_ctl *c, int32_t v) { (void)c; (void)v; return 0; }
 int ui_visible(void) { return 0; }
 void cfg_set_int(const char *s, const char *k, int v) { (void)s; (void)k; (void)v; }
+void cfg_mark_dirty(void) {}
+ph_ctl *ph_tdp_ctl(void) { return NULL; }
+
+/* the session log: rows counted, the last one kept */
+volatile LONG g_slog;
+static int slog_rows, slog_closed;
+static ph_slog_row slog_last;
+static wchar_t slog_exe[64];
+void slog_row(uint64_t now, const ph_slog_row *r)
+{
+    (void)now;
+    slog_rows++;
+    slog_last = *r;
+    lstrcpynW(slog_exe, r->exe ? r->exe : L"", 64);
+}
+void slog_close(void) { slog_closed++; }
 int cfg_get_str(const char *s, const char *k, char *o, int n) { (void)s; (void)k; (void)o; (void)n; return 0; }
 int cfg_set_str(const char *s, const char *k, const char *v) { (void)s; (void)k; (void)v; return 0; }
 int fps_start(void) { return 0; }
@@ -563,6 +579,10 @@ static int run(int idx, int cores, int epp_mode, double *power, int mode)
     if (s->user_pmax) wp_write(NULL, &G_CPMAX1, (DWORD)s->user_pmax, (DWORD)s->user_pmax);
     for (int i = 0; i < 20; i++) plant(50);
 
+    g_slog = 1;
+    slog_rows = slog_closed = 0;
+    memset(&slog_last, 0, sizeof slog_last);
+    slog_exe[0] = 0;
     if (start_locked()) { printf("    FAIL AutoTDP did not start\n"); return 0; }
     worker(NULL);
     int ok = 1;
@@ -598,6 +618,20 @@ static int run(int idx, int cores, int epp_mode, double *power, int mode)
     ok &= restored("after stop", 33);
     if (cap_cpu != cpu_clk.max_mhz || cap_gpu != gpu_clk.max_mhz) {
         printf("    FAIL clock caps left on after stop\n");
+        ok = 0;
+    }
+    /* the session log: a row a second while the game draws frames, closed at stop */
+    int game_s = (s->quit_s ? s->quit_s : s->dur_s) - (s->pause_s ? 5 : 0);
+    /* (the crash path leaves files alone) */
+    if (slog_rows < game_s - 8 || slog_rows > game_s + 1 || slog_closed != !s->crash || slog_last.fps <= 0.0f ||
+        slog_last.target <= 0 || lstrcmpW(slog_exe, L"game.exe")) {
+        printf("    FAIL session log: %d rows for %d s of game, closed %d times\n", slog_rows, game_s, slog_closed);
+        ok = 0;
+    }
+    g_slog = 0;
+    /* with no main window (exiting) a stop leaves auto.on alone: it starts again next time */
+    if (ctls[K_ON].active || ctls[K_ON].val) {
+        printf("    FAIL a stop while exiting changed auto.on\n");
         ok = 0;
     }
     double p = stat_n > 0 ? stat_p / stat_n : 0;
