@@ -1,0 +1,20 @@
+name: test
+
+# Every push and pull request: build everything and run AutoTDP against the
+# simulated handheld (tests/autotdp_sim.c) under Wine, so a tuning change that
+# breaks frame holding or restore is caught before a release.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: sudo apt-get update -q && sudo apt-get install -y -q mingw-w64 wine wine64
+      - name: Build
+        run: make -j4 all
+      - name: AutoTDP simulation
+        run: make sim

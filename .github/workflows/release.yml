@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
-        run: sudo apt-get update -q && sudo apt-get install -y -q mingw-w64 zip
+        run: sudo apt-get update -q && sudo apt-get install -y -q mingw-w64 wine wine64 zip
       - name: Version
         id: ver
         run: |
@@ -21,6 +21,9 @@ jobs:
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
       - name: Build
         run: make -j4 dist
+      # A release never ships if AutoTDP fails the simulated handheld.
+      - name: AutoTDP simulation
+        run: make sim
       - uses: actions/upload-artifact@v4
         with:
           name: PhawxON-${{ steps.ver.outputs.ver }}
