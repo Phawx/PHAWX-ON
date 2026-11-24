@@ -1116,14 +1116,18 @@ static DWORD WINAPI worker(LPVOID p)
 
 /* ---------- start / stop ---------- */
 
+/* auto.on follows every start and stop (tray, the AutoTDP button, a profile) and
+   is saved like any control, into the game profile while one is active. Not while
+   exiting (g_main is gone): it comes back on at the next start. */
 static void notify(int on)
 {
-    ctls[K_ON].val = on;
-    ctls[K_ON].dirty = 1;
     if (on) ctls[K_POWER].flags &= (uint16_t)~CF_HIDDEN;
     else ctls[K_POWER].flags |= CF_HIDDEN;
     if (g_main && IsWindow(g_main)) {
-        cfg_set_int("global", "autotdp.on", on);
+        ctls[K_ON].val = on;
+        ctls[K_ON].active = 1;
+        ctls[K_ON].dirty = 1;
+        cfg_mark_dirty();
         PostMessageW(g_main, WM_PH_REFRESH, 0, 0);
     }
 }
@@ -1479,7 +1483,7 @@ static const wchar_t *gpu_ch[9];
 
 static ph_ctl ctls[K_COUNT] = {
     [K_ON] = { .key = "auto.on", .label = L"Phawx ON", .type = CT_TOGGLE, .page = PG_QUICK, .order = 1,
-               .flags = CF_NOSAVE, .set = set_on, .get = get_on, .fmt = fmt_onoff },
+               .flags = CF_PROFILE, .set = set_on, .get = get_on, .fmt = fmt_onoff },
     [K_TARGET] = { .key = "auto.target", .label = L"Target", .type = CT_CHOICE, .page = PG_QUICK, .order = 2,
                    .flags = QK, .choices = target_ch, .set = set_target },
     [K_FPS] = { .key = "auto.fps", .label = L"Target FPS", .type = CT_SLIDER, .page = PG_QUICK, .order = 3,

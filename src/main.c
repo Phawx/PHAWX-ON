@@ -526,6 +526,20 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
         if (prof && !prof->active && cfg_any_profile()) { prof->active = 1; prof->val = 1; prof->dirty = 1; }
         cfg_set_int("global", "app.migrated", 1);
     }
+    /* AutoTDP on/off used to be kept apart as autotdp.on; it is the saved auto.on
+       now (per game too), which ph_apply_all starts it from */
+    ph_ctl *aon = ph_ctl_find("auto.on");
+    char aov[8];
+    if (cfg_get_str("global", "autotdp.on", aov, sizeof aov)) {
+        if (aon && !aon->active && aov[0] == '1') {
+            aon->val = aon->active = 1;
+            cfg_set_int("global", "auto.on", 1);
+        }
+        cfg_set_str("global", "autotdp.on", NULL);
+    }
+    /* but at start, where it always started: once the plugins and the UI are up */
+    int auto_on = aon && aon->active && aon->val;
+    if (auto_on) aon->active = 0;
     ph_apply_all(0);
     plugins_started();
     SetTimer(g_main, TM_FANS, 1000, NULL);
@@ -537,7 +551,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE prev, PWSTR cmd, int show)
     fg_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, NULL, fg_proc, 0, 0,
                               WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-    if (cfg_get_int("global", "autotdp.on", 0)) autotdp_start();
+    if (auto_on) { aon->active = 1; autotdp_start(); }
     if (restart) ui_show_page(PG_PLUGINS);
     else if (cmd && !wcsstr(cmd, L"/tray") && !cfg_get_int("global", "app.silent", 0)) ui_show(1);
     app_tray_update();
