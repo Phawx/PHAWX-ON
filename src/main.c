@@ -237,6 +237,7 @@ static int set_profiles(ph_ctl *c, int32_t v)
     if (!v && cur_profile[0]) { app_save(); profile_switch(NULL); }
     return 0;
 }
+
 /* ---------- TDP and GPU clock step hotkeys ---------- */
 
 static const struct { UINT mod, vk; } step_keys[] = {
@@ -531,6 +532,9 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             if (ph_ms() - last > 3000) {
                 last = ph_ms();
                 ph_backends_resume();
+                /* plugged in or out while asleep */
+                int ac = platform_on_ac();
+                if (ac != g_plat.on_ac) { g_plat.on_ac = ac; cfg_dc_power(!ac); }
                 ph_apply_all(0);
             }
         } else if (w == PBT_APMPOWERSTATUSCHANGE) {
