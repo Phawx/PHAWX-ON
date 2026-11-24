@@ -69,10 +69,20 @@ $(SIM): tests/autotdp_sim.c src/autotdp.c src/phawx.h
 sim: $(SIM)
 	$(if $(filter Windows_NT,$(OS)),,WINEDEBUG=-all wine )$(SIM)
 
+# logic that does not need Windows, built and run with the host compiler
+HOSTCC ?= gcc
+TESTS  = build/test/hidpad_test
+build/test/%: tests/%.c src/hidpad.h
+	@mkdir -p build/test
+	$(HOSTCC) -O2 -std=c11 -Wall -Wextra -o $@ $<
+
+test: $(TESTS)
+	@for t in $(TESTS); do $$t || exit 1; done
+
 version:
 	@echo $(VERSION)
 
 clean:
 	rm -rf build dist
 
-.PHONY: all plugins dist version clean sim
+.PHONY: all plugins dist version clean sim test

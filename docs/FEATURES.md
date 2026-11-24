@@ -38,7 +38,7 @@ Control keys (such as `cpu.tdp`) are the names used in `phawx.ini`.
 | AutoTDP simulation | Yes | `tests/autotdp_sim.c` (`make sim`) | autotdp.c against a simulated handheld with a fake OS clock: GPU- and CPU-bound games, scene change, target out of reach, battery-only and no power reading, game quit, crash. Checks FPS held, power against the best setting found by brute force, core floors, settling, and restore. |
 | FPS source | Yes | `src/fps.c` | Intel PresentMon service (PresentMonAPI2). The DLL is only loaded from Program Files. There is no in-process ETW fallback. |
 | Per-game profiles | Partial | `src/main.c` (`app.profiles`), `src/config.c` | Off by default. "Save profile for current game" (Settings) turns them on. Switches automatically on the foreground exe, using `[game:<exe>]` sections. Controls flagged `CF_PROFILE` are saved. The AutoTDP on/off state itself is global, not per game. Configs from 1.0 that already have profiles keep them on. |
-| Gamepad navigation | Partial | `src/input.c` | XInput pads, including the Guide button through XInputGetStateEx. Y pins or unpins the selected setting; holding X resets it. Non-XInput HID pads (for example DualSense, or some vendor handheld buttons) are not read. |
+| Gamepad navigation | Partial | `src/input.c`, `src/hidpad.h` | XInput pads, including the Guide button through XInputGetStateEx. Y pins or unpins the selected setting; holding X resets it. DualSense, DualSense Edge and DualShock 4 (USB and Bluetooth) and the ROG Ally / Ally X Armoury Crate and Command Center keys are read over HID as well (see [HID gamepads](#hid-gamepads)), and either kind opens the overlay. Legion Go and MSI Claw buttons that are not XInput are not read. |
 | Button combo to open | Yes | `src/input.c`, `src/main.c` (`app.combo`) | Default is Guide, or Back+Start. Settings → "Open menu combo" records any combo of two or more held buttons. |
 | Touch | Yes | `src/input.c`, `src/ui.c` | Swipe left from the top-right screen edge to open. Tap, drag and scroll inside the panel. Tap a row's pin to pin it (on a slider, on its label line; the track line always drags). Press and hold a saved setting for 2 seconds to reset it (0.5 s with a mouse). Moving more than about 10 px cancels a tap or hold, and up/down movement scrolls. Windows' press-and-hold ring, pen tap and barrel feedback and pen flicks are turned off for the panel. |
 | Tray icon | Yes | `src/main.c` | Click toggles the menu. The right-click menu has Open, AutoTDP, Start with Windows and Exit. |
@@ -95,3 +95,29 @@ Control keys (such as `cpu.tdp`) are the names used in `phawx.ini`.
 | Dock / undock and battery TDP override | Partial | Settings are reapplied on AC/DC change, but there are no separate AC and DC values yet. |
 | TDP / GPU up and down hotkeys | No | Use the overlay. Dedicated step hotkeys could be added in `src/main.c`. |
 | Hardware info screen | Partial | The System page's Hardware info table shows everything Phawx ON reads (see above). Not read yet: per-core clocks and temperatures, motherboard sensor chips, RAM modules, drive health. |
+
+## HID gamepads
+
+`src/input.c` reads these over HID next to XInput, with the report layouts in `src/hidpad.h` (checked by `make test`). The HID devices are listed once at start and again after Windows reports a device change, never polled for. Only paths with Sony's or ASUS's vendor id are opened, and only the collection named below. Without such a device there are no handles and no reads. Each pad keeps one overlapped read in flight, and the input timer (66 ms while the overlay is closed, 16 ms while it is open) takes the latest report. A pad that another program opened exclusively is skipped.
+
+| Device | VID:PID | Reports |
+|---|---|---|
+| DualShock 4 | 054C:05C4, 054C:09CC, 054C:0BA0 (USB adapter) | USB 0x01; Bluetooth 0x11 (state 2 bytes later) and the short 0x01 |
+| DualSense, DualSense Edge | 054C:0CE6, 054C:0DF2 | USB 0x01; Bluetooth 0x31 (state 1 byte later) and the short 0x01, which has the DualShock 4 layout |
+| ROG Ally, Ally X | 0B05:1ABE, 0B05:1B4C, collection on usage page 0xFF31 | 0x5A with a key code: 0x38 Armoury Crate, 0xA6 Command Center |
+
+Bluetooth pads send the short report until a program asks for the full one (Steam does). A pad is on Bluetooth when its input reports are not 64 bytes long.
+
+| PlayStation button | Phawx ON (XInput) |
+|---|---|
+| Cross, Circle, Square, Triangle | A, B, X, Y |
+| L1, R1 | LB, RB |
+| L2, R2 (past 100 of 255) | LT, RT |
+| L3, R3 | LS, RS |
+| Create / Share | Back (View) |
+| Options | Start (Menu) |
+| PS | Guide |
+| D-pad (hat), left stick | D-pad |
+| Touchpad, mute, Edge paddles | not used |
+
+On the ROG Ally both keys act as Guide, so either opens the overlay with the default combo; the key code only arrives as a press, so it counts as held until the next poll. A press seen by two sources at once (a pad and the virtual Xbox pad Steam makes of it) toggles the overlay once.
