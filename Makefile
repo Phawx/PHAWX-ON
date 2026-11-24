@@ -69,10 +69,22 @@ $(SIM): tests/autotdp_sim.c src/autotdp.c src/phawx.h
 sim: $(SIM)
 	$(if $(filter Windows_NT,$(OS)),,WINEDEBUG=-all wine )$(SIM)
 
+# the portable logic (tests/logic_test.c), built with the native compiler against
+# tests/native/windows.h; runs anywhere
+HOSTCC ?= gcc
+TEST = build/logic_test
+$(TEST): tests/logic_test.c tests/native/windows.h src/config.c src/registry.c src/phawx.h $(wildcard src/*.h)
+	@mkdir -p build
+	$(HOSTCC) -O1 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
+		-Itests/native -Isrc -o $@ $<
+
+test: $(TEST)
+	$(TEST)
+
 version:
 	@echo $(VERSION)
 
 clean:
 	rm -rf build dist
 
-.PHONY: all plugins dist version clean sim
+.PHONY: all plugins dist version clean sim test

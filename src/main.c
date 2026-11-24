@@ -130,11 +130,19 @@ static void profile_switch(const wchar_t *exe)
         if (!c || !c->key || !(c->flags & CF_PROFILE) || (c->flags & CF_NOSAVE)) continue;
         if (c->type == CT_ACTION || c->type == CT_INFO || c->type == CT_HEADER) continue;
         if (was) was[i] = c->active;
+    }
+    /* clear the plugged-in set; the profile brings its own battery values */
+    cfg_dc_use(0);
+    for (int i = 0; i < n; i++) {
+        ph_ctl *c = ph_ctl_at(i);
+        if (!c || !c->key || !(c->flags & CF_PROFILE) || (c->flags & CF_NOSAVE)) continue;
+        if (c->type == CT_ACTION || c->type == CT_INFO || c->type == CT_HEADER) continue;
         c->active = 0;
         c->val = c->def;
     }
     cfg_load_profile(NULL);
     if (exe && exe[0]) cfg_load_profile(exe);
+    cfg_dc_use(!g_plat.on_ac);
     for (int i = 0; was && i < n; i++) {
         ph_ctl *c = ph_ctl_at(i);
         if (was[i] && !c->active && !autotdp_owns(c)) ph_ctl_reset(c);
@@ -214,11 +222,7 @@ static int act_del_profile(ph_ctl *c, int32_t v)
     (void)c; (void)v;
     if (!cur_profile[0]) { ui_toast(L"No active game profile"); return -1; }
     app_save();
-    wchar_t s[160];
-    ph_swprintf(s, 160, L"game:%s", cur_profile);
-    wchar_t ini[MAX_PATH];
-    ph_swprintf(ini, MAX_PATH, L"%s\\phawx.ini", cfg_dir());
-    WritePrivateProfileStringW(s, NULL, NULL, ini);
+    cfg_del_profile(cur_profile);
     profile_switch(NULL);
     ui_toast(L"Profile deleted");
     return 0;
@@ -245,6 +249,8 @@ static int act_reset_all(ph_ctl *c, int32_t v)
         ph_ctl *k = ph_ctl_at(i);
         if (k->key && k->active && k->type != CT_ACTION) ph_ctl_reset(k);
     }
+    /* and no battery values: both sets are at Default now */
+    for (int i = 0, n = ph_ctl_count(); i < n; i++) ph_ctl_at(i)->dc = 0;
     wp_commit();
     app_save();
     ui_toast(L"All settings reverted to defaults");
@@ -432,7 +438,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             }
         } else if (w == PBT_APMPOWERSTATUSCHANGE) {
             int ac = platform_on_ac();
-            if (ac != g_plat.on_ac) { g_plat.on_ac = ac; ph_apply_all(0); }
+            if (ac != g_plat.on_ac) {
+                g_plat.on_ac = ac;
+                cfg_dc_power(!ac);      /* the other set of values, if any differ */
+                ph_apply_all(0);
+                ui_refresh();
+            }
         }
         return TRUE;
     case WM_DISPLAYCHANGE: ui_refresh(); return 0;

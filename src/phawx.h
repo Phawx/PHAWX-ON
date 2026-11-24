@@ -79,6 +79,12 @@ struct ph_ctl {
     int16_t            order;     /* sort key within page, lower first */
     ph_sub_fn          sub;       /* optional status line under the label */
     void             (*release)(ph_ctl *c);  /* optional, CF_OPTIONAL: it went back to Default */
+    /* on-battery value (config.c): val/active are always the value in force, the
+       other power source's waits here */
+    uint8_t            dc;        /* has a value of its own on battery */
+    uint8_t            ac_active; /* while the battery value is in force: the plugged-in one */
+    int32_t            ac_val;
+    int32_t            dc_val;    /* while plugged in: the battery value */
 };
 
 /* ---------- clock domains used by AutoTDP ---------- */
@@ -290,9 +296,20 @@ const wchar_t *cfg_file(void);
 void cfg_load_profile(const wchar_t *exe);  /* NULL = global */
 void cfg_save_profile(const wchar_t *exe);
 int  cfg_has_profile(const wchar_t *exe);
+void cfg_del_profile(const wchar_t *exe);  /* with its battery values */
 int  cfg_any_profile(void);                 /* any [game:*] section saved */
 const wchar_t *cfg_dir(void);
 void cfg_mark_dirty(void);
+/* on-battery values: a CF_PROFILE control may keep one of its own, saved as [dc]
+   (or [dc:game:x.exe]) under the same key; none means the same as plugged in.
+   set 0 = plugged in, 1 = on battery. */
+int  cfg_dc_able(const ph_ctl *c);                 /* can have an on-battery value */
+int  cfg_dc_in(void);                              /* the battery values are in force */
+int  cfg_dc_get(const ph_ctl *c, int set, int32_t *v);  /* that set's value; returns its active */
+int  cfg_dc_edit(ph_ctl *c, int set, int32_t v);   /* change one set; applied only if it is in force */
+void cfg_dc_clear(ph_ctl *c, int set);             /* hold-to-reset: battery = same as plugged in */
+void cfg_dc_use(int dc);                           /* put one set in force, hardware untouched */
+void cfg_dc_power(int dc);                         /* the power source changed: swap, reset what went to Default */
 
 /* ---------- input (input.c) ---------- */
 /* IN_RESET resets at once (Delete key); the pad's X and keyboard R reset only when
